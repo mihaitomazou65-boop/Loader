@@ -1,6 +1,11 @@
-﻿import { pool } from "./db.js";
+﻿import { hasDatabase, pool } from "./db.js";
 
 export async function migrate() {
+  if (!hasDatabase()) {
+    console.warn("skip migrate: DATABASE_URL is not set");
+    return;
+  }
+
   try {
     await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
   } catch (err) {

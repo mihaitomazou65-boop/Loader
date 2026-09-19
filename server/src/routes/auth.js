@@ -16,6 +16,13 @@ function validatePassword(password) {
 }
 
 export function registerAuthRoutes(app) {
+  app.use("/auth", (req, res, next) => {
+    if (!process.env.DATABASE_URL) {
+      return res.status(503).json({ message: "Database is not configured" });
+    }
+    next();
+  });
+
   app.post("/auth/signup", async (req, res) => {
     try {
       const name = readName(req.body);
