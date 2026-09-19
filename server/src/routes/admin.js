@@ -131,17 +131,6 @@ const PAGE = `<!doctype html>
     </div>
   </section>
   <section id="licenses" class="hide">
-    <div class="card" style="border-color:#6c5ce7">
-      <h3 style="margin:0 0 6px">FiveM product file</h3>
-      <p class="sub">Upload the .exe buyers launch with Play. One file per product.</p>
-      <p class="sub" id="licFileInfo">No file yet</p>
-      <div class="row">
-        <label>File
-          <input id="pfile-lic" type="file"/>
-        </label>
-        <button class="act" id="upfile-lic">Upload file</button>
-      </div>
-    </div>
     <div class="card">
       <div class="row">
         <label>Product
@@ -205,8 +194,6 @@ async function load(){
   document.getElementById("sUsed").textContent=data.stats.redeemed;
   document.getElementById("sLife").textContent=data.stats.lifetime;
   const files=data.productFiles||{};
-  const fm=files.FiveM||{};
-  document.getElementById("licFileInfo").textContent=fm.name?("Current: "+fm.name):"No file uploaded yet";
   document.getElementById("productsBody").innerHTML=P.map(p=>{
     const f=files[p]||{};
     return "<tr><td><b>"+esc(p)+"</b></td><td>"+esc(f.name||"No file yet")+"</td><td class='acts'><input type='file' id='pfile-"+esc(p)+"'/><button class='act tiny' data-act='up-file' data-product='"+esc(p)+"'>Save file</button></td></tr>";
@@ -224,17 +211,6 @@ async function load(){
   }).join("")||"<tr><td colspan=8>No keys</td></tr>";
 }
 document.getElementById("reload").onclick=()=>load().catch(()=>{});
-document.getElementById("upfile-lic").onclick=async()=>{
-  const f=document.getElementById("pfile-lic").files[0];
-  if(!f){ alert("Pick the FiveM .exe first"); return; }
-  const fd=new FormData();
-  fd.append("file", f);
-  fd.append("product","FiveM");
-  const r=await fetch("/admin/api/product-file",{method:"POST",body:fd});
-  if(!r.ok){ alert("Upload failed"); return; }
-  await load();
-  alert("FiveM file saved");
-};
 document.getElementById("gen").onclick=async()=>{
   const body={
     count:Number(document.getElementById("count").value||1),
