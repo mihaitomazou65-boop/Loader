@@ -16,6 +16,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <shellapi.h>
+#include <shlobj.h>
 
 namespace loader_ui {
 namespace {
@@ -31,7 +33,7 @@ bool g_wantSubmit = false;
 bool g_wantRedeem = false;
 bool g_redeemOpen = false;
 std::atomic<bool> g_redeemBusy{false};
-char g_key[48]{};
+char g_key[96]{};
 bool g_error = false;
 char g_name[64]{};
 char g_password[128]{};
@@ -143,6 +145,51 @@ void drawCloseX(ImDrawList* dl) {
     dl->AddLine(ImVec2(cx + r, cy - r), ImVec2(cx - r, cy + r), xc, 1.2f);
 }
 
+void launchFiveM() {
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"open";
+    sei.nShow = SW_SHOWNORMAL;
+    sei.lpFile = L"fivem://";
+    if (ShellExecuteExW(&sei))
+        return;
+    wchar_t localApp[MAX_PATH]{};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localApp))) {
+        std::wstring exe = std::wstring(localApp) + L"\\FiveM\\FiveM.exe";
+        sei.lpFile = exe.c_str();
+        ShellExecuteExW(&sei);
+    }
+}
+
+void drawFiveMProduct(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
+    const float x = wp.x + 16.f;
+    const float y = wp.y + 52.f;
+    const float w = ws.x - 32.f;
+    const float h = 64.f;
+    const ImVec2 a(x, y);
+    const ImVec2 b(x + w, y + h);
+    dl->AddRectFilled(a, b, IM_COL32(16, 16, 18, 255), 10.f);
+    dl->AddRect(a, b, IM_COL32(42, 42, 46, 255), 10.f, 0, 1.f);
+
+    ImGui::SetCursorScreenPos(ImVec2(x + 18.f, y + (h - ImGui::GetFontSize()) * 0.5f));
+    if (font::brand_font)
+        ImGui::PushFont(font::brand_font);
+    ImGui::TextUnformatted("FiveM");
+    if (font::brand_font)
+        ImGui::PopFont();
+
+    const float pr = 16.f;
+    const ImVec2 pc(b.x - 28.f, y + h * 0.5f);
+    ImGui::SetCursorScreenPos(ImVec2(pc.x - pr, pc.y - pr));
+    if (ImGui::InvisibleButton("play_fivem", ImVec2(pr * 2.f, pr * 2.f)))
+        launchFiveM();
+    const bool hov = ImGui::IsItemHovered();
+    dl->AddCircleFilled(pc, pr, hov ? IM_COL32(48, 48, 52, 255) : IM_COL32(28, 28, 32, 255), 32);
+    dl->AddCircle(pc, pr, IM_COL32(70, 70, 76, 255), 32, 1.f);
+    dl->AddTriangleFilled(ImVec2(pc.x - 4.f, pc.y - 7.f), ImVec2(pc.x - 4.f, pc.y + 7.f), ImVec2(pc.x + 8.f, pc.y), IM_COL32(230, 230, 230, 255));
+}
+
 void drawSpinner(ImDrawList* dl, ImVec2 center, float radius, float alpha) {
     alpha = ImClamp(alpha, 0.f, 1.f);
     const float t = (float)ImGui::GetTime() * 2.55f;
@@ -184,6 +231,11 @@ void applyAuthResult(const AuthResult& r) {
         return;
     }
     if (g_view == View::LoggedIn) {
+        if (!r.user.product.empty())
+            g_user.product = r.user.product;
+        g_user.lifetime = r.user.lifetime;
+        g_user.expires = r.user.expires;
+        g_auth.saveSession(g_token, g_user);
         setStatus(r.message.empty() ? "Key redeemed" : r.message.c_str(), false);
         std::memset(g_key, 0, sizeof(g_key));
         g_redeemOpen = false;
@@ -354,6 +406,9 @@ void drawAuthScreen() {
             ImGui::SetCursorScreenPos(ImVec2(wp.x + 14.f, wp.y + 10.f));
             if (custom::Button("Redeem key", ImVec2(112.f, 28.f)))
                 g_redeemOpen = true;
+
+            if (!g_user.product.empty())
+                drawFiveMProduct(dl, wp, ws);
 
             if (g_redeemOpen) {
                 const ImVec2 box(320.f, 168.f);

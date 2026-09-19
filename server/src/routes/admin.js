@@ -13,9 +13,23 @@ function hashKey(raw) {
 }
 
 function makeKey(product) {
-  const hex = randomBytes(8).toString("hex").toUpperCase();
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const n = 32;
+  const bytes = randomBytes(n);
+  let body = "";
+  for (let i = 0; i < n; i++) body += alphabet[bytes[i] % alphabet.length];
+  const groups = [];
+  for (let i = 0; i < n; i += 4) groups.push(body.slice(i, i + 4));
   const tag = String(product || "FIVEM").replace(/[^A-Z0-9]/gi, "").slice(0, 6).toUpperCase() || "FIVEM";
-  return `${tag}-${hex.slice(0, 4)}-${hex.slice(4, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}`;
+  return `${tag}-${groups.join("-")}`;
+}
+
+function keyPrefix(key) {
+  return String(key)
+    .split("-")
+    .filter(Boolean)
+    .slice(0, 3)
+    .join("-");
 }
 
 function deny(req, res) {
@@ -212,7 +226,7 @@ export function registerAdminRoutes(app) {
       keys: keys.rows.map((r) => {
         const d = durationByCode(r.duration_code);
         return {
-          prefix: r.prefix,
+          prefix: String(r.prefix || "").replace(/-+$/g, ""),
           product: r.product || "FiveM",
           duration: d.label,
           redeemed: Boolean(r.redeemed_at),
@@ -235,7 +249,7 @@ export function registerAdminRoutes(app) {
     const made = [];
     for (let i = 0; i < count; i++) {
       const key = makeKey(product);
-      const prefix = key.slice(0, 11);
+      const prefix = keyPrefix(key);
       await pool.query(
         `INSERT INTO license_keys (key_hash, prefix, created_ip, product, duration_code, duration_seconds, note)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,

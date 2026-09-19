@@ -6,6 +6,9 @@
 struct AuthUser {
     std::string id;
     std::string email;
+    std::string product;
+    bool lifetime = false;
+    std::string expires;
 };
 
 struct AuthResult {

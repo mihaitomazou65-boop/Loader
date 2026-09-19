@@ -19,6 +19,7 @@ struct AppWindow {
     bool beginFrame();
     void endFrame();
     void handleResize(UINT width, UINT height);
+    void setClientSizeCentered(int w, int h);
 
     static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 };

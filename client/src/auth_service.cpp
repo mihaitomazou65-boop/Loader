@@ -175,6 +175,10 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
                 out.user.email = jsonText(u, "name");
                 if (out.user.email.empty())
                     out.user.email = jsonText(u, "email");
+                out.user.product = jsonText(u, "product");
+                out.user.expires = jsonText(u, "expires");
+                if (u.contains("lifetime") && u["lifetime"].is_boolean())
+                    out.user.lifetime = u["lifetime"].get<bool>();
             }
             out.ok = !out.token.empty() || (j.contains("ok") && j["ok"].is_boolean() && j["ok"].get<bool>());
             if (out.ok && !out.token.empty())
@@ -189,6 +193,8 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
                 out.message = "Name already taken";
             else if (resp.status == 403)
                 out.message = out.message.empty() ? "Account locked to this device" : out.message;
+            else if (resp.status == 404)
+                out.message = out.message.empty() ? "Invalid key" : out.message;
             else if (resp.status == 401)
                 out.message = "Wrong name or password";
             else if (resp.status == 0)
@@ -261,7 +267,14 @@ AuthResult AuthService::me(const std::string& token) {
 
 bool AuthService::saveSession(const std::string& token, const AuthUser& user) {
     try {
-        json j = { {"token", token}, {"id", user.id}, {"email", user.email} };
+        json j = {
+            {"token", token},
+            {"id", user.id},
+            {"email", user.email},
+            {"product", user.product},
+            {"lifetime", user.lifetime},
+            {"expires", user.expires}
+        };
         std::ofstream f(sessionPath(), std::ios::trunc);
         f << j.dump(2);
         return f.good();
@@ -282,6 +295,10 @@ bool AuthService::loadSession(std::string& tokenOut, AuthUser& userOut) {
         tokenOut = jsonText(j, "token");
         userOut.id = jsonText(j, "id");
         userOut.email = jsonText(j, "email");
+        userOut.product = jsonText(j, "product");
+        userOut.expires = jsonText(j, "expires");
+        if (j.contains("lifetime") && j["lifetime"].is_boolean())
+            userOut.lifetime = j["lifetime"].get<bool>();
         return !tokenOut.empty();
     } catch (...) {
         return false;
