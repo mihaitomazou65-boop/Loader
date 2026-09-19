@@ -9,10 +9,14 @@ struct AuthUser {
     std::string product;
     bool lifetime = false;
     std::string expires;
+    std::string fileName;
+    std::string fileVersion;
+    std::string thumbVersion;
 };
 
 struct AuthResult {
     bool ok = false;
+    bool liveSync = false;
     std::string message;
     std::string token;
     AuthUser user;

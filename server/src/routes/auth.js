@@ -45,6 +45,7 @@ function publicUser(row) {
     expires: row.sub_expires_at || null,
     file_name: "",
     file_version: "",
+    thumb_version: "",
   };
 }
 
@@ -60,6 +61,13 @@ async function withProductFile(row) {
       u.file_name = f.rows[0].filename || "";
       u.file_version = String(f.rows[0].version || "");
     }
+  } catch (_) {}
+  try {
+    const t = await pool.query(
+      `SELECT version FROM product_thumbs WHERE product = $1`,
+      [u.product]
+    );
+    if (t.rows[0]) u.thumb_version = String(t.rows[0].version || "");
   } catch (_) {}
   return u;
 }
@@ -299,6 +307,33 @@ export function registerAuthRoutes(app) {
       res.set("X-Product-File", name);
       res.set("X-Product-Version", String(row.version || ""));
       res.set("Content-Disposition", `attachment; filename="${name}"`);
+      return res.send(row.data);
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  app.get("/auth/product-thumb", authMiddleware, async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT id, banned, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
+        [req.user.id]
+      );
+      const user = result.rows[0];
+      if (!user) return res.status(401).json({ message: "Unauthorized" });
+      if (user.banned) return res.status(403).json({ message: "Account banned" });
+      const u = publicUser(user);
+      if (!u.product) return res.status(403).json({ message: "No product" });
+      const file = await pool.query(
+        `SELECT filename, version, mime, data FROM product_thumbs WHERE product = $1`,
+        [u.product]
+      );
+      if (!file.rowCount) return res.status(404).json({ message: "No thumbnail" });
+      const row = file.rows[0];
+      res.set("Content-Type", row.mime || "image/jpeg");
+      res.set("X-Thumb-Version", String(row.version || ""));
+      res.set("Cache-Control", "no-store");
       return res.send(row.data);
     } catch (err) {
       console.error(err);

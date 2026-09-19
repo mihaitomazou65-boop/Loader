@@ -1,4 +1,7 @@
 ﻿import { hasDatabase, pool } from "./db.js";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 export async function migrate() {
   if (!hasDatabase()) {
@@ -92,5 +95,34 @@ export async function migrate() {
     `);
   } catch (err) {
     console.error("product_files", err.message);
+  }
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_thumbs (
+        product TEXT PRIMARY KEY,
+        filename TEXT NOT NULL,
+        version TEXT NOT NULL,
+        mime TEXT NOT NULL DEFAULT 'image/jpeg',
+        data BYTEA NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    const existing = await pool.query(`SELECT product FROM product_thumbs WHERE product = 'FiveM'`);
+    if (!existing.rowCount) {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const banner = path.join(here, "..", "assets", "fivem_banner.jpg");
+      if (fs.existsSync(banner)) {
+        const buf = fs.readFileSync(banner);
+        await pool.query(
+          `INSERT INTO product_thumbs (product, filename, version, mime, data, updated_at)
+           VALUES ('FiveM', 'fivem_banner.jpg', $1, 'image/jpeg', $2, NOW())
+           ON CONFLICT (product) DO NOTHING`,
+          [String(Date.now()), buf]
+        );
+      }
+    }
+  } catch (err) {
+    console.error("product_thumbs", err.message);
   }
 }

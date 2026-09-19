@@ -1,0 +1,3 @@
+#include "client/include/resource.h"
+
+IDR_FIVEM_BANNER RCDATA "client\\assets\\fivem_banner.jpg"

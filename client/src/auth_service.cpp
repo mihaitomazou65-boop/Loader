@@ -1,5 +1,7 @@
 #include "auth_service.hpp"
 #include "http_client.hpp"
+#include "obfuscate.hpp"
+#include "session_crypto.hpp"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -24,10 +26,23 @@ namespace {
 fs::path sessionPath() {
     wchar_t buf[MAX_PATH]{};
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, buf);
-    fs::path dir = fs::path(buf) / L"Loader";
+    fs::path dir = fs::path(buf) / OBFW(L"Loader");
     std::error_code ec;
     fs::create_directories(dir, ec);
-    return dir / L"session.json";
+    return dir / OBFW(L"session.dat");
+}
+
+fs::path legacySessionPath() {
+    wchar_t buf[MAX_PATH]{};
+    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, buf);
+    return fs::path(buf) / OBFW(L"Loader") / OBFW(L"session.json");
+}
+
+bool parseSessionJson(const std::string& text, json& jOut) {
+    if (text.empty())
+        return false;
+    jOut = json::parse(text, nullptr, false);
+    return !jOut.is_discarded() && jOut.is_object();
 }
 
 std::string jsonText(const json& j, const char* key) {
@@ -44,7 +59,7 @@ std::string jsonText(const json& j, const char* key) {
 json parseBody(const std::string& body) {
     if (body.empty())
         return json::object();
-    if (body[0] == '<' || body.find("Application loading") != std::string::npos)
+    if (body[0] == '<' || body.find(OBF("Application loading")) != std::string::npos)
         return json::object();
     json j = json::parse(body, nullptr, false);
     if (j.is_discarded() || !j.is_object())
@@ -98,33 +113,34 @@ std::string collectTraces() {
     wchar_t guid[256]{};
     DWORD guidSize = sizeof(guid);
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS) {
-        RegQueryValueExW(key, L"MachineGuid", nullptr, nullptr, (LPBYTE)guid, &guidSize);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, OBFW(L"SOFTWARE\\Microsoft\\Cryptography"), 0, KEY_READ | KEY_WOW64_64KEY,
+            &key) == ERROR_SUCCESS) {
+        RegQueryValueExW(key, OBFW(L"MachineGuid"), nullptr, nullptr, (LPBYTE)guid, &guidSize);
         RegCloseKey(key);
     }
-    blob += "mg=";
+    blob += OBF("mg=");
     blob += wideToUtf8Local(guid);
-    blob += ";";
+    blob += OBF(";");
 
     wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1]{};
     DWORD computerLen = MAX_COMPUTERNAME_LENGTH + 1;
     GetComputerNameW(computer, &computerLen);
-    blob += "cn=";
+    blob += OBF("cn=");
     blob += wideToUtf8Local(computer);
-    blob += ";";
+    blob += OBF(";");
 
     wchar_t user[UNLEN + 1]{};
     DWORD userLen = UNLEN + 1;
     GetUserNameW(user, &userLen);
-    blob += "un=";
+    blob += OBF("un=");
     blob += wideToUtf8Local(user);
-    blob += ";";
+    blob += OBF(";");
 
     DWORD serial = 0;
-    GetVolumeInformationW(L"C:\\", nullptr, 0, &serial, nullptr, nullptr, nullptr, 0);
-    blob += "vs=";
+    GetVolumeInformationW(OBFW(L"C:\\"), nullptr, 0, &serial, nullptr, nullptr, nullptr, 0);
+    blob += OBF("vs=");
     blob += std::to_string(serial);
-    blob += ";";
+    blob += OBF(";");
 
     ULONG bufLen = 0;
     GetAdaptersInfo(nullptr, &bufLen);
@@ -134,13 +150,13 @@ std::string collectTraces() {
             auto* adp = reinterpret_cast<PIP_ADAPTER_INFO>(buf.data());
             int n = 0;
             while (adp && n < 8) {
-                blob += "mac=";
+                blob += OBF("mac=");
                 for (UINT i = 0; i < adp->AddressLength; ++i) {
                     char hex[8];
                     sprintf_s(hex, "%02x", adp->Address[i]);
                     blob += hex;
                 }
-                blob += ";";
+                blob += OBF(";");
                 adp = adp->Next;
                 ++n;
             }
@@ -165,102 +181,117 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
         }
 
         const json j = parseBody(resp.body);
-        out.message = jsonText(j, "message");
+        out.message = jsonText(j, OBF("message"));
 
         if (resp.status >= 200 && resp.status < 300) {
-            out.token = jsonText(j, "token");
-            if (j.contains("user") && j["user"].is_object()) {
-                const json& u = j["user"];
-                out.user.id = jsonText(u, "id");
-                out.user.email = jsonText(u, "name");
+            out.token = jsonText(j, OBF("token"));
+            if (j.contains(OBF("user")) && j[OBF("user")].is_object()) {
+                const json& u = j[OBF("user")];
+                out.user.id = jsonText(u, OBF("id"));
+                out.user.email = jsonText(u, OBF("name"));
                 if (out.user.email.empty())
-                    out.user.email = jsonText(u, "email");
-                out.user.product = jsonText(u, "product");
-                out.user.expires = jsonText(u, "expires");
-                if (u.contains("lifetime") && u["lifetime"].is_boolean())
-                    out.user.lifetime = u["lifetime"].get<bool>();
+                    out.user.email = jsonText(u, OBF("email"));
+                out.user.product = jsonText(u, OBF("product"));
+                out.user.expires = jsonText(u, OBF("expires"));
+                out.user.fileName = jsonText(u, OBF("file_name"));
+                out.user.fileVersion = jsonText(u, OBF("file_version"));
+                out.user.thumbVersion = jsonText(u, OBF("thumb_version"));
+                if (u.contains(OBF("lifetime")) && u[OBF("lifetime")].is_boolean())
+                    out.user.lifetime = u[OBF("lifetime")].get<bool>();
             }
-            out.ok = !out.token.empty() || (j.contains("ok") && j["ok"].is_boolean() && j["ok"].get<bool>());
+            out.ok = !out.token.empty() || !out.user.id.empty() || !out.user.email.empty()
+                || (j.contains(OBF("ok")) && j[OBF("ok")].is_boolean() && j[OBF("ok")].get<bool>());
             if (out.ok && !out.token.empty())
                 out.message.clear();
             else if (!out.ok && out.message.empty())
-                out.message = "Login failed";
+                out.message = OBF("Login failed");
             return out;
         }
 
         if (out.message.empty()) {
             if (resp.status == 409)
-                out.message = "Name already taken";
+                out.message = OBF("This key has already been used");
+            else if (resp.status == 400)
+                out.message = OBF("Invalid key");
             else if (resp.status == 403)
-                out.message = out.message.empty() ? "Account locked to this device" : out.message;
+                out.message = OBF("Account locked");
             else if (resp.status == 404)
-                out.message = out.message.empty() ? "Invalid key" : out.message;
+                out.message = OBF("Invalid key");
             else if (resp.status == 401)
-                out.message = "Wrong name or password";
+                out.message = OBF("Login expired, sign in again");
+            else if (resp.status == 429)
+                out.message = OBF("Too many tries, wait a bit");
             else if (resp.status == 0)
-                out.message = resp.error.empty() ? "Can't reach server" : resp.error;
+                out.message = resp.error.empty() ? OBF("Can't reach server") : resp.error;
             else
-                out.message = "Request failed";
+                out.message = resp.error.empty() ? OBF("Can't redeem this key") : resp.error;
         }
         return out;
     } catch (...) {
         out.ok = false;
-        out.message = "Wrong name or password";
+        out.message = OBF("Wrong name or password");
         return out;
     }
 }
 
 AuthResult AuthService::signup(const std::string& name, const std::string& password) {
     try {
-        json body = { {"name", name}, {"email", name}, {"password", password}, {"hwid", deviceHwid()} };
-        return parseAuthResponse(HttpClient::request(L"POST", L"/auth/signup", body.dump()));
+        json body = {
+            {OBF("name"), name},
+            {OBF("email"), name},
+            {OBF("password"), password},
+            {OBF("hwid"), deviceHwid()}};
+        return parseAuthResponse(HttpClient::request(OBFW(L"POST"), OBFW(L"/auth/signup"), body.dump()));
     } catch (...) {
         AuthResult out;
-        out.message = "Sign up failed";
+        out.message = OBF("Sign up failed");
         return out;
     }
 }
 
 AuthResult AuthService::login(const std::string& name, const std::string& password) {
     try {
-        json body = { {"name", name}, {"email", name}, {"password", password}, {"hwid", deviceHwid()} };
-        return parseAuthResponse(HttpClient::request(L"POST", L"/auth/login", body.dump()));
+        json body = {
+            {OBF("name"), name},
+            {OBF("email"), name},
+            {OBF("password"), password},
+            {OBF("hwid"), deviceHwid()}};
+        return parseAuthResponse(HttpClient::request(OBFW(L"POST"), OBFW(L"/auth/login"), body.dump()));
     } catch (...) {
         AuthResult out;
-        out.message = "Wrong name or password";
+        out.message = OBF("Wrong name or password");
         return out;
     }
 }
 
 AuthResult AuthService::redeem(const std::string& token, const std::string& key) {
     try {
-        json body = { {"key", key} };
-        return parseAuthResponse(HttpClient::request(L"POST", L"/auth/redeem", body.dump(), token));
+        std::string cleaned;
+        cleaned.reserve(key.size());
+        for (unsigned char c : key) {
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
+                continue;
+            if (c >= 'a' && c <= 'z')
+                cleaned.push_back(static_cast<char>(c - 32));
+            else
+                cleaned.push_back(static_cast<char>(c));
+        }
+        json body = { {OBF("key"), cleaned} };
+        return parseAuthResponse(HttpClient::request(OBFW(L"POST"), OBFW(L"/auth/redeem"), body.dump(), token));
     } catch (...) {
         AuthResult out;
-        out.message = "Redeem failed";
+        out.message = OBF("Redeem failed");
         return out;
     }
 }
 
 AuthResult AuthService::me(const std::string& token) {
-    AuthResult out;
     try {
-        const HttpResponse resp = HttpClient::request(L"GET", L"/auth/me", {}, token);
-        if (resp.status >= 200 && resp.status < 300) {
-            const json j = parseBody(resp.body);
-            if (j.contains("user") && j["user"].is_object()) {
-                out.user.id = jsonText(j["user"], "id");
-                out.user.email = jsonText(j["user"], "name");
-                if (out.user.email.empty())
-                    out.user.email = jsonText(j["user"], "email");
-                out.ok = !out.user.email.empty();
-            }
-            return out;
-        }
+        const HttpResponse resp = HttpClient::request(OBFW(L"GET"), OBFW(L"/auth/me"), {}, token);
         return parseAuthResponse(resp);
     } catch (...) {
-        out.message = "Session check failed";
+        AuthResult out;
+        out.message = OBF("Session check failed");
         return out;
     }
 }
@@ -268,16 +299,16 @@ AuthResult AuthService::me(const std::string& token) {
 bool AuthService::saveSession(const std::string& token, const AuthUser& user) {
     try {
         json j = {
-            {"token", token},
-            {"id", user.id},
-            {"email", user.email},
-            {"product", user.product},
-            {"lifetime", user.lifetime},
-            {"expires", user.expires}
-        };
-        std::ofstream f(sessionPath(), std::ios::trunc);
-        f << j.dump(2);
-        return f.good();
+            {OBF("token"), token},
+            {OBF("id"), user.id},
+            {OBF("email"), user.email},
+            {OBF("product"), user.product},
+            {OBF("lifetime"), user.lifetime},
+            {OBF("expires"), user.expires},
+            {OBF("file_name"), user.fileName},
+            {OBF("file_version"), user.fileVersion},
+            {OBF("thumb_version"), user.thumbVersion}};
+        return session_crypto::writeEncryptedFile(sessionPath(), j.dump());
     } catch (...) {
         return false;
     }
@@ -285,20 +316,31 @@ bool AuthService::saveSession(const std::string& token, const AuthUser& user) {
 
 bool AuthService::loadSession(std::string& tokenOut, AuthUser& userOut) {
     try {
-        std::ifstream f(sessionPath());
-        if (!f)
-            return false;
         json j;
-        f >> j;
-        if (!j.is_object())
-            return false;
-        tokenOut = jsonText(j, "token");
-        userOut.id = jsonText(j, "id");
-        userOut.email = jsonText(j, "email");
-        userOut.product = jsonText(j, "product");
-        userOut.expires = jsonText(j, "expires");
-        if (j.contains("lifetime") && j["lifetime"].is_boolean())
-            userOut.lifetime = j["lifetime"].get<bool>();
+        std::string plain;
+        const fs::path path = sessionPath();
+        if (session_crypto::readEncryptedFile(path, plain) && parseSessionJson(plain, j)) {
+            // ok
+        } else {
+            std::ifstream legacy(legacySessionPath());
+            if (!legacy)
+                return false;
+            std::string legacyText((std::istreambuf_iterator<char>(legacy)), std::istreambuf_iterator<char>());
+            if (!parseSessionJson(legacyText, j))
+                return false;
+            session_crypto::writeEncryptedFile(path, legacyText);
+            fs::remove(legacySessionPath());
+        }
+        tokenOut = jsonText(j, OBF("token"));
+        userOut.id = jsonText(j, OBF("id"));
+        userOut.email = jsonText(j, OBF("email"));
+        userOut.product = jsonText(j, OBF("product"));
+        userOut.expires = jsonText(j, OBF("expires"));
+        userOut.fileName = jsonText(j, OBF("file_name"));
+        userOut.fileVersion = jsonText(j, OBF("file_version"));
+        userOut.thumbVersion = jsonText(j, OBF("thumb_version"));
+        if (j.contains(OBF("lifetime")) && j[OBF("lifetime")].is_boolean())
+            userOut.lifetime = j[OBF("lifetime")].get<bool>();
         return !tokenOut.empty();
     } catch (...) {
         return false;
@@ -308,4 +350,5 @@ bool AuthService::loadSession(std::string& tokenOut, AuthUser& userOut) {
 void AuthService::clearSession() {
     std::error_code ec;
     fs::remove(sessionPath(), ec);
+    fs::remove(legacySessionPath(), ec);
 }

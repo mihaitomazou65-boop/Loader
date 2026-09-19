@@ -41,6 +41,20 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 });
+const uploadThumb = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
+
+function thumbMime(name, mime) {
+  const n = String(name || "").toLowerCase();
+  const t = String(mime || "").toLowerCase();
+  if (t.startsWith("image/")) return t.split(";")[0];
+  if (n.endsWith(".png")) return "image/png";
+  if (n.endsWith(".webp")) return "image/webp";
+  if (n.endsWith(".gif")) return "image/gif";
+  return "image/jpeg";
+}
 
 function uuid(v) {
   const id = String(v || "");
@@ -98,6 +112,7 @@ const PAGE = `<!doctype html>
   .warn { color:var(--warn); }
   .keyline { font-family:ui-monospace,monospace; background:#0b0e14; border:1px solid var(--line); padding:10px 12px; border-radius:8px; margin-top:8px; }
   .hide { display:none; }
+  .thumb { height:48px; width:88px; object-fit:cover; border-radius:8px; background:#0b0e14; border:1px solid var(--line); display:block; }
 </style>
 </head>
 <body>
@@ -123,9 +138,9 @@ const PAGE = `<!doctype html>
   </section>
   <section id="products" class="hide">
     <div class="card">
-      <p class="sub">Attach the .exe for each product. FiveM customers get this file when they click Play.</p>
+      <p class="sub">Attach the .exe and the loader banner for each product. Thumbnail changes show up live in the loader.</p>
       <table>
-        <thead><tr><th>Product</th><th>Current file</th><th>Upload</th></tr></thead>
+        <thead><tr><th>Product</th><th>Current file</th><th>Upload file</th><th>Thumbnail</th><th>Upload thumbnail</th></tr></thead>
         <tbody id="productsBody"></tbody>
       </table>
     </div>
@@ -194,9 +209,12 @@ async function load(){
   document.getElementById("sUsed").textContent=data.stats.redeemed;
   document.getElementById("sLife").textContent=data.stats.lifetime;
   const files=data.productFiles||{};
+  const thumbs=data.productThumbs||{};
   document.getElementById("productsBody").innerHTML=P.map(p=>{
     const f=files[p]||{};
-    return "<tr><td><b>"+esc(p)+"</b></td><td>"+esc(f.name||"No file yet")+"</td><td class='acts'><input type='file' id='pfile-"+esc(p)+"'/><button class='act tiny' data-act='up-file' data-product='"+esc(p)+"'>Save file</button></td></tr>";
+    const t=thumbs[p]||{};
+    const img=t.version?("<img class='thumb' src='/admin/api/product-thumb?product="+encodeURIComponent(p)+"&v="+esc(t.version)+"'/>"):"<span class='sub'>None</span>";
+    return "<tr><td><b>"+esc(p)+"</b></td><td>"+esc(f.name||"No file yet")+"</td><td class='acts'><input type='file' id='pfile-"+esc(p)+"'/><button class='act tiny' data-act='up-file' data-product='"+esc(p)+"'>Save file</button></td><td>"+img+"</td><td class='acts'><input type='file' accept='image/*' id='pthumb-"+esc(p)+"'/><button class='act tiny' data-act='up-thumb' data-product='"+esc(p)+"'>Save thumbnail</button></td></tr>";
   }).join("");
   document.getElementById("usersBody").innerHTML=(data.users||[]).map(u=>
     "<tr><td>"+esc(u.name)+(u.banned?" <span class='bad'>banned</span>":"")+"</td><td><code>"+esc(u.last_ip)+"</code></td><td><code>"+esc(u.ip)+"</code></td><td><code>"+esc(u.hwid)+"</code></td><td>"+esc(u.sub)+"</td><td>"+(u.lifetime?"Lifetime":fmt(u.expires))+"</td><td>"+fmt(u.last_seen)+"</td><td class='acts'>"+
@@ -249,6 +267,18 @@ document.addEventListener("click", async (e)=>{
       fd.append("product", product);
       const r=await fetch("/admin/api/product-file",{method:"POST",body:fd});
       if(!r.ok){ alert("Upload failed"); return; }
+      await load();
+      return;
+    } else if(act==="up-thumb"){
+      const product=b.dataset.product||"FiveM";
+      const inp=document.getElementById("pthumb-"+product);
+      const f=inp&&inp.files&&inp.files[0];
+      if(!f){ alert("Pick a thumbnail for "+product+" first"); return; }
+      const fd=new FormData();
+      fd.append("file", f);
+      fd.append("product", product);
+      const r=await fetch("/admin/api/product-thumb",{method:"POST",body:fd});
+      if(!r.ok){ alert("Thumbnail upload failed"); return; }
       await load();
       return;
     } else if(act==="cancel-key"){
@@ -306,9 +336,15 @@ export function registerAdminRoutes(app) {
     for (const row of fileRows.rows) {
       productFiles[row.product] = { name: row.filename, version: row.version, size: row.bytes };
     }
+    const thumbRows = await pool.query(`SELECT product, filename, version FROM product_thumbs`);
+    const productThumbs = {};
+    for (const row of thumbRows.rows) {
+      productThumbs[row.product] = { name: row.filename, version: row.version };
+    }
     res.json({
       stats: { users: users.rowCount, unused, redeemed, lifetime },
       productFiles,
+      productThumbs,
       users: users.rows.map((r) => ({
         id: r.id,
         name: r.email,
@@ -373,6 +409,49 @@ export function registerAdminRoutes(app) {
          VALUES ($1, $2, $3, $4, NOW())
          ON CONFLICT (product) DO UPDATE SET filename = $2, version = $3, data = $4, updated_at = NOW()`,
         [product, filename, version, req.file.buffer]
+      );
+      return res.json({ ok: true, name: filename, version });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  app.get("/admin/api/product-thumb", requireAdmin, async (req, res) => {
+    const product = PRODUCTS.includes(req.query?.product) ? req.query.product : "FiveM";
+    try {
+      const file = await pool.query(
+        `SELECT filename, mime, data FROM product_thumbs WHERE product = $1`,
+        [product]
+      );
+      if (!file.rowCount) return res.status(404).end();
+      const row = file.rows[0];
+      res.set("Content-Type", row.mime || "image/jpeg");
+      res.set("Cache-Control", "no-store");
+      return res.send(row.data);
+    } catch (err) {
+      console.error(err);
+      return res.status(500).end();
+    }
+  });
+
+  app.post("/admin/api/product-thumb", requireAdmin, uploadThumb.single("file"), async (req, res) => {
+    try {
+      if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+        return res.status(400).json({ message: "No file" });
+      }
+      const product = PRODUCTS.includes(req.body?.product) ? req.body.product : "FiveM";
+      const filename = String(req.file.originalname || "thumb.jpg").replace(/[^\w.\-]+/g, "_").slice(0, 80);
+      const mime = thumbMime(filename, req.file.mimetype);
+      if (!mime.startsWith("image/")) {
+        return res.status(400).json({ message: "Image only" });
+      }
+      const version = String(Date.now());
+      await pool.query(
+        `INSERT INTO product_thumbs (product, filename, version, mime, data, updated_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         ON CONFLICT (product) DO UPDATE SET filename = $2, version = $3, mime = $4, data = $5, updated_at = NOW()`,
+        [product, filename, version, mime, req.file.buffer]
       );
       return res.json({ ok: true, name: filename, version });
     } catch (err) {
