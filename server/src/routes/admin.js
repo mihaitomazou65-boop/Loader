@@ -14,12 +14,11 @@ function hashKey(raw) {
 
 function makeKey(product) {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const n = 32;
+  const n = 12;
   const bytes = randomBytes(n);
   let body = "";
   for (let i = 0; i < n; i++) body += alphabet[bytes[i] % alphabet.length];
-  const groups = [];
-  for (let i = 0; i < n; i += 4) groups.push(body.slice(i, i + 4));
+  const groups = [body.slice(0, 4), body.slice(4, 8), body.slice(8, 12)];
   const tag = String(product || "FIVEM").replace(/[^A-Z0-9]/gi, "").slice(0, 6).toUpperCase() || "FIVEM";
   return `${tag}-${groups.join("-")}`;
 }
