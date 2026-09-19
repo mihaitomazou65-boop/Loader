@@ -39,6 +39,10 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ message: "Server error" });
 });
 
+process.on("unhandledRejection", (err) => {
+  console.error("unhandledRejection", err);
+});
+
 async function main() {
   try {
     await migrate();

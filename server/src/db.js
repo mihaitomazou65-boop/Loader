@@ -32,6 +32,7 @@ export function getPool() {
 
 export const pool = {
   query: (...args) => getPool().query(...args),
+  connect: () => getPool().connect(),
 };
 
 export function hasDatabase() {

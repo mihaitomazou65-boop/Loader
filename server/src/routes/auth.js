@@ -182,8 +182,9 @@ export function registerAuthRoutes(app) {
   });
 
   app.post("/auth/redeem", authMiddleware, async (req, res) => {
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       const raw = String(req.body?.key || "").trim().toUpperCase().replace(/[\s\u00A0\u2010-\u2015\u2212]/g, "").replace(/[^A-Z0-9-]/g, "");
       if (raw.length < 10 || raw.length > 80) {
         return res.status(400).json({ message: "Invalid key" });
@@ -250,11 +251,11 @@ export function registerAuthRoutes(app) {
         user: publicUser(fresh.rows[0]),
       });
     } catch (err) {
-      try { await client.query("ROLLBACK"); } catch (_) {}
+      try { if (client) await client.query("ROLLBACK"); } catch (_) {}
       console.error(err);
       return res.status(500).json({ message: "Server error" });
     } finally {
-      client.release();
+      if (client) client.release();
     }
   });
 }
