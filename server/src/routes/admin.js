@@ -39,7 +39,7 @@ function requireAdmin(req, res, next) {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 });
 
 function uuid(v) {
