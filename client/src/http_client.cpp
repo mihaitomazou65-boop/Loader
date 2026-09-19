@@ -87,6 +87,9 @@ HttpResponse HttpClient::request(
         result.error = "WinHttpOpen failed";
         return result;
     }
+    WinHttpSetTimeouts(session, 4000, 4000, 8000, 8000);
+    DWORD tls = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+    WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &tls, sizeof(tls));
 
     HINTERNET connect = WinHttpConnect(session, base.host.c_str(), base.port, 0);
     if (!connect) {

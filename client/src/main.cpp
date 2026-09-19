@@ -1,8 +1,6 @@
-#include "app_window.hpp"
+﻿#include "app_window.hpp"
 #include "auth_screen.hpp"
-
 #include "imgui_impl_dx11.h"
-
 #include <windows.h>
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
@@ -13,7 +11,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplDX11_CreateDeviceObjects();
 
     while (g_app.beginFrame()) {
-        loader_ui::drawAuthScreen();
+        try {
+            loader_ui::drawAuthScreen();
+        } catch (...) {
+        }
         g_app.endFrame();
     }
 

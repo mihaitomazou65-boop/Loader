@@ -5,14 +5,30 @@
 #include "imgui_impl_win32.h"
 
 #include <d3d11.h>
+#include <dwmapi.h>
 #include <tchar.h>
+#include <windowsx.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 AppWindow g_app;
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_COLOR_NONE
+#define DWMWA_COLOR_NONE 0xFFFFFFFE
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
 
 namespace {
 
@@ -59,6 +75,15 @@ bool createDevice(AppWindow& app) {
 } // namespace
 
 LRESULT CALLBACK AppWindow::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCHITTEST) {
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hwnd, &pt);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        if (pt.y >= 0 && pt.y < 46 && pt.x >= 0 && pt.x < (rc.right - 44))
+            return HTCAPTION;
+    }
+
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
         return true;
 
@@ -80,6 +105,9 @@ LRESULT CALLBACK AppWindow::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 }
 
 bool AppWindow::create(HINSTANCE instance) {
+    width = 360;
+    height = 356;
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_CLASSDC;
@@ -87,6 +115,7 @@ bool AppWindow::create(HINSTANCE instance) {
     wc.hInstance = instance;
     wc.lpszClassName = L"LoaderAuthWindow";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     RegisterClassExW(&wc);
 
     const int sx = GetSystemMetrics(SM_CXSCREEN);
@@ -103,6 +132,11 @@ bool AppWindow::create(HINSTANCE instance) {
         nullptr, nullptr, instance, nullptr);
 
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+    const int roundPref = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &roundPref, sizeof(roundPref));
+    const COLORREF border = RGB(230, 230, 230);
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
 
     if (!createDevice(*this))
         return false;
@@ -155,7 +189,7 @@ bool AppWindow::beginFrame() {
 
 void AppWindow::endFrame() {
     ImGui::Render();
-    const float clear[4] = { 0.02f, 0.02f, 0.02f, 1.f };
+    const float clear[4] = { 8.f / 255.f, 8.f / 255.f, 8.f / 255.f, 1.f };
     context->OMSetRenderTargets(1, &renderTarget, nullptr);
     context->ClearRenderTargetView(renderTarget, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());

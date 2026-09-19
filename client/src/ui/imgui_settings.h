@@ -62,7 +62,7 @@ inline namespace c
 	// Global menu scale — tweak this to resize the whole UI (window, fonts, widgets).
 	inline namespace ui
 	{
-		inline constexpr float scale = 0.80f;
+		inline constexpr float scale = 1.00f;
 		inline float S(float v) { return v * scale; }
 	}
 

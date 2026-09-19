@@ -11,8 +11,8 @@ struct AppWindow {
     IDXGISwapChain* swapChain = nullptr;
     ID3D11RenderTargetView* renderTarget = nullptr;
 
-    int width = 520;
-    int height = 640;
+    int width = 360;
+    int height = 356;
 
     bool create(HINSTANCE instance);
     void destroy();
