@@ -2,7 +2,7 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-let pool = null;
+let pgPool = null;
 
 function createPool() {
   const connectionString = process.env.DATABASE_URL;
@@ -24,10 +24,10 @@ export function getPool() {
     err.status = 503;
     throw err;
   }
-  if (!pool) {
-    pool = createPool();
+  if (!pgPool) {
+    pgPool = createPool();
   }
-  return pool;
+  return pgPool;
 }
 
 export const pool = {
