@@ -1,11 +1,52 @@
 import { createHmac } from "crypto";
 
+function strip(ip) {
+  return String(ip || "")
+    .trim()
+    .replace(/^::ffff:/i, "");
+}
+
+export function isPrivateIp(ip) {
+  const v = strip(ip);
+  if (!v) return true;
+  if (v === "127.0.0.1" || v === "::1" || v === "localhost") return true;
+  if (v.startsWith("10.")) return true;
+  if (v.startsWith("192.168.")) return true;
+  if (v.startsWith("169.254.")) return true;
+  const m = v.match(/^172\.(\d+)\./);
+  if (m) {
+    const n = Number(m[1]);
+    if (n >= 16 && n <= 31) return true;
+  }
+  if (v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe80:")) return true;
+  return false;
+}
+
+function candidates(req) {
+  const headers = [
+    req.headers["cf-connecting-ip"],
+    req.headers["true-client-ip"],
+    req.headers["x-real-ip"],
+    req.headers["x-client-ip"],
+    req.headers["x-forwarded-for"],
+    req.ip,
+  ];
+  const out = [];
+  for (const h of headers) {
+    if (!h) continue;
+    String(h)
+      .split(",")
+      .map((s) => strip(s))
+      .filter(Boolean)
+      .forEach((ip) => out.push(ip));
+  }
+  return out;
+}
+
 export function clientIp(req) {
-  const fwd = String(req.headers["x-forwarded-for"] || "")
-    .split(",")[0]
-    .trim();
-  const raw = (fwd || String(req.ip || "")).split(",")[0].trim();
-  return raw.replace(/^::ffff:/i, "");
+  const list = candidates(req);
+  const pub = list.find((ip) => !isPrivateIp(ip));
+  return pub || list[0] || "";
 }
 
 export function adminIps() {

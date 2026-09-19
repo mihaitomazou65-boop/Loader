@@ -1,7 +1,8 @@
 ﻿import bcrypt from "bcryptjs";
 import { pool } from "../db.js";
 import { authMiddleware, signToken } from "../middleware/auth.js";
-import { clientIp } from "../util/ip.js";
+import { clientIp, isPrivateIp } from "../util/ip.js";
+import { durationByCode } from "../util/duration.js";
 import { hashKey } from "./admin.js";
 
 function readName(body) {
@@ -26,7 +27,9 @@ function readHwid(body) {
 function bindConflict(row, hwid, ip) {
   if (!row.bind_hwid || !row.bind_ip) return null;
   if (row.bind_hwid !== hwid) return "Account locked to another device";
-  if (row.bind_ip !== ip) return "Account locked to another network";
+  if (row.bind_ip && !isPrivateIp(row.bind_ip) && row.bind_ip !== ip) {
+    return "Account locked to another network";
+  }
   return null;
 }
 
@@ -65,8 +68,8 @@ export function registerAuthRoutes(app) {
 
       const password_hash = await bcrypt.hash(password, 12);
       const result = await pool.query(
-        `INSERT INTO users (email, password_hash, bind_hwid, bind_ip)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO users (email, password_hash, bind_hwid, bind_ip, last_seen_ip, last_seen_at)
+         VALUES ($1, $2, $3, $4, $4, NOW())
          RETURNING id, email, created_at`,
         [name, password_hash, hwid, ip]
       );
@@ -112,9 +115,10 @@ export function registerAuthRoutes(app) {
         return res.status(401).json({ message: "Wrong name or password" });
       }
 
-      if (!row.bind_hwid || !row.bind_ip) {
+      if (!row.bind_hwid || !row.bind_ip || isPrivateIp(row.bind_ip)) {
         await pool.query(
-          `UPDATE users SET bind_hwid = $1, bind_ip = $2 WHERE id = $3 AND bind_hwid IS NULL`,
+          `UPDATE users SET bind_hwid = COALESCE(bind_hwid, $1), bind_ip = $2, last_seen_ip = $2, last_seen_at = NOW()
+           WHERE id = $3`,
           [hwid, ip, row.id]
         );
       } else {
@@ -122,6 +126,10 @@ export function registerAuthRoutes(app) {
         if (locked) {
           return res.status(403).json({ message: locked });
         }
+        await pool.query(
+          `UPDATE users SET last_seen_ip = $1, last_seen_at = NOW() WHERE id = $2`,
+          [ip, row.id]
+        );
       }
 
       const token = signToken({ id: row.id, email: row.email });
@@ -172,21 +180,33 @@ export function registerAuthRoutes(app) {
 
       const digest = hashKey(raw);
       const found = await pool.query(
-        `SELECT id, redeemed_at FROM license_keys WHERE key_hash = $1 LIMIT 1`,
+        `SELECT id, redeemed_at, product, duration_code, duration_seconds FROM license_keys WHERE key_hash = $1 LIMIT 1`,
         [digest]
       );
       const key = found.rows[0];
       if (!key) return res.status(404).json({ message: "Invalid key" });
       if (key.redeemed_at) return res.status(409).json({ message: "Key already redeemed" });
 
+      const dur = durationByCode(key.duration_code);
+      const lifetime = !dur.seconds;
+      const expiresSql = lifetime ? null : new Date(Date.now() + dur.seconds * 1000);
+
       const upd = await pool.query(
-        `UPDATE license_keys SET redeemed_at = NOW(), redeemed_by = $1
+        `UPDATE license_keys SET redeemed_at = NOW(), redeemed_by = $1, expires_at = $3
          WHERE id = $2 AND redeemed_at IS NULL
          RETURNING id`,
-        [req.user.id, key.id]
+        [req.user.id, key.id, expiresSql]
       );
       if (!upd.rowCount) return res.status(409).json({ message: "Key already redeemed" });
-      return res.json({ ok: true, message: "Key redeemed" });
+
+      await pool.query(
+        `UPDATE users SET sub_product = $1, sub_expires_at = $2, sub_lifetime = $3 WHERE id = $4`,
+        [key.product || "FiveM", expiresSql, lifetime, req.user.id]
+      );
+      return res.json({
+        ok: true,
+        message: lifetime ? "FiveM lifetime redeemed" : `FiveM key redeemed until ${expiresSql.toISOString()}`,
+      });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ message: "Server error" });

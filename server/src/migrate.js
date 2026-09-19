@@ -38,7 +38,12 @@ export async function migrate() {
     await pool.query(`
       ALTER TABLE users
         ADD COLUMN IF NOT EXISTS bind_hwid TEXT,
-        ADD COLUMN IF NOT EXISTS bind_ip TEXT
+        ADD COLUMN IF NOT EXISTS bind_ip TEXT,
+        ADD COLUMN IF NOT EXISTS last_seen_ip TEXT,
+        ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS sub_product TEXT,
+        ADD COLUMN IF NOT EXISTS sub_expires_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS sub_lifetime BOOLEAN NOT NULL DEFAULT FALSE
     `);
   } catch (err) {
     console.error("bind columns", err.message);
@@ -58,5 +63,18 @@ export async function migrate() {
     `);
   } catch (err) {
     console.error("license_keys", err.message);
+  }
+
+  try {
+    await pool.query(`
+      ALTER TABLE license_keys
+        ADD COLUMN IF NOT EXISTS product TEXT NOT NULL DEFAULT 'FiveM',
+        ADD COLUMN IF NOT EXISTS duration_code TEXT NOT NULL DEFAULT '30d',
+        ADD COLUMN IF NOT EXISTS duration_seconds INTEGER,
+        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS note TEXT
+    `);
+  } catch (err) {
+    console.error("license_keys cols", err.message);
   }
 }
