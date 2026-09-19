@@ -203,8 +203,7 @@ export function registerAuthRoutes(app) {
       const digest = hashKey(raw);
       await client.query("BEGIN");
       const found = await client.query(
-        `SELECT id, redeemed_at, cancelled_at, product, duration_code, duration_seconds
-         FROM license_keys WHERE key_hash = $1 LIMIT 1 FOR UPDATE`,
+        `SELECT * FROM license_keys WHERE key_hash = $1 LIMIT 1 FOR UPDATE`,
         [digest]
       );
       const key = found.rows[0];
@@ -227,7 +226,7 @@ export function registerAuthRoutes(app) {
 
       const upd = await client.query(
         `UPDATE license_keys SET redeemed_at = NOW(), redeemed_by = $1, expires_at = $3
-         WHERE id = $2 AND redeemed_at IS NULL AND cancelled_at IS NULL
+         WHERE id = $2 AND redeemed_at IS NULL
          RETURNING id`,
         [req.user.id, key.id, expiresSql]
       );
