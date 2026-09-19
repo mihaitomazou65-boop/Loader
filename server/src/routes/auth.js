@@ -46,6 +46,8 @@ function publicUser(row) {
     file_name: "",
     file_version: "",
     thumb_version: "",
+    thumb_fx: 0.5,
+    thumb_fy: 0.5,
   };
 }
 
@@ -64,10 +66,16 @@ async function withProductFile(row) {
   } catch (_) {}
   try {
     const t = await pool.query(
-      `SELECT version FROM product_thumbs WHERE product = $1`,
+      `SELECT version, focus_x, focus_y FROM product_thumbs WHERE product = $1`,
       [u.product]
     );
-    if (t.rows[0]) u.thumb_version = String(t.rows[0].version || "");
+    if (t.rows[0]) {
+      u.thumb_version = String(t.rows[0].version || "");
+      const fx = Number(t.rows[0].focus_x);
+      const fy = Number(t.rows[0].focus_y);
+      u.thumb_fx = Number.isFinite(fx) ? Math.min(1, Math.max(0, fx)) : 0.5;
+      u.thumb_fy = Number.isFinite(fy) ? Math.min(1, Math.max(0, fy)) : 0.5;
+    }
   } catch (_) {}
   return u;
 }

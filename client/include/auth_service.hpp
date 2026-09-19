@@ -12,6 +12,8 @@ struct AuthUser {
     std::string fileName;
     std::string fileVersion;
     std::string thumbVersion;
+    float thumbFx = 0.5f;
+    float thumbFy = 0.5f;
 };
 
 struct AuthResult {

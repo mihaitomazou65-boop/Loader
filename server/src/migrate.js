@@ -125,4 +125,14 @@ export async function migrate() {
   } catch (err) {
     console.error("product_thumbs", err.message);
   }
+
+  try {
+    await pool.query(`
+      ALTER TABLE product_thumbs
+        ADD COLUMN IF NOT EXISTS focus_x DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+        ADD COLUMN IF NOT EXISTS focus_y DOUBLE PRECISION NOT NULL DEFAULT 0.5
+    `);
+  } catch (err) {
+    console.error("product_thumbs focus", err.message);
+  }
 }

@@ -112,7 +112,15 @@ const PAGE = `<!doctype html>
   .warn { color:var(--warn); }
   .keyline { font-family:ui-monospace,monospace; background:#0b0e14; border:1px solid var(--line); padding:10px 12px; border-radius:8px; margin-top:8px; }
   .hide { display:none; }
-  .thumb { height:48px; width:88px; object-fit:cover; border-radius:8px; background:#0b0e14; border:1px solid var(--line); display:block; }
+  .pcard { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .loader-preview { position:relative; width:min(616px,100%); height:108px; border-radius:12px; overflow:hidden; cursor:grab; user-select:none; border:1px solid #2a3140; background:#0b0e14; touch-action:none; }
+  .loader-preview:active { cursor:grabbing; }
+  .loader-preview img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; pointer-events:none; }
+  .loader-preview .shade { position:absolute; inset:0; background:rgba(0,0,0,.46); pointer-events:none; }
+  .loader-preview .pv-name { position:absolute; left:18px; top:16px; font-size:18px; font-weight:700; color:#fff; text-shadow:0 1px 2px #000; pointer-events:none; }
+  .loader-preview .pv-sub { position:absolute; left:18px; top:44px; font-size:12px; color:rgba(230,230,236,.92); pointer-events:none; }
+  .loader-preview .pv-play { position:absolute; right:16px; top:50%; width:46px; height:46px; margin-top:-23px; border-radius:10px; background:#2a2c32; border:1px solid rgba(255,255,255,.15); pointer-events:none; }
+  .loader-preview .pv-play:after { content:""; position:absolute; left:18px; top:14px; border-style:solid; border-width:9px 0 9px 14px; border-color:transparent transparent transparent #e8e9ee; }
 </style>
 </head>
 <body>
@@ -137,13 +145,8 @@ const PAGE = `<!doctype html>
     </div>
   </section>
   <section id="products" class="hide">
-    <div class="card">
-      <p class="sub">Attach the .exe and the loader banner for each product. Thumbnail changes show up live in the loader.</p>
-      <table>
-        <thead><tr><th>Product</th><th>Current file</th><th>Upload file</th><th>Thumbnail</th><th>Upload thumbnail</th></tr></thead>
-        <tbody id="productsBody"></tbody>
-      </table>
-    </div>
+    <p class="sub">Upload the .exe and banner. Drag the preview to frame it exactly like the loader (616×108).</p>
+    <div id="productsBody"></div>
   </section>
   <section id="licenses" class="hide">
     <div class="card">
@@ -183,6 +186,8 @@ const PAGE = `<!doctype html>
 <script>
 const D = ${JSON.stringify(DURATIONS)};
 const P = ${JSON.stringify(PRODUCTS)};
+const crop={};
+let drag=null;
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function fmt(v){ if(!v) return "—"; const d=new Date(v); return isNaN(d) ? esc(v) : d.toLocaleString(); }
 async function api(path,opt){
@@ -213,8 +218,18 @@ async function load(){
   document.getElementById("productsBody").innerHTML=P.map(p=>{
     const f=files[p]||{};
     const t=thumbs[p]||{};
-    const img=t.version?("<img class='thumb' src='/admin/api/product-thumb?product="+encodeURIComponent(p)+"&v="+esc(t.version)+"'/>"):"<span class='sub'>None</span>";
-    return "<tr><td><b>"+esc(p)+"</b></td><td>"+esc(f.name||"No file yet")+"</td><td class='acts'><input type='file' id='pfile-"+esc(p)+"'/><button class='act tiny' data-act='up-file' data-product='"+esc(p)+"'>Save file</button></td><td>"+img+"</td><td class='acts'><input type='file' accept='image/*' id='pthumb-"+esc(p)+"'/><button class='act tiny' data-act='up-thumb' data-product='"+esc(p)+"'>Save thumbnail</button></td></tr>";
+    const fx=Math.min(1,Math.max(0,Number(t.fx??0.5)));
+    const fy=Math.min(1,Math.max(0,Number(t.fy??0.5)));
+    crop[p]={x:fx,y:fy};
+    const img=t.version
+      ?("<img src='/admin/api/product-thumb?product="+encodeURIComponent(p)+"&v="+esc(t.version)+"' style='object-position:"+((fx*100).toFixed(2))+"% "+((fy*100).toFixed(2))+"%'/>")
+      :"";
+    return "<div class='pcard'><div class='row' style='margin-bottom:12px'><b style='color:var(--text);font-size:15px'>"+esc(p)+"</b><span class='sub' style='margin:0'>"+esc(f.name||"No file yet")+"</span></div>"+
+      "<div class='row' style='margin-bottom:12px'><label>Product file<input type='file' id='pfile-"+esc(p)+"'/></label><button class='act' data-act='up-file' data-product='"+esc(p)+"'>Save file</button>"+
+      "<label>Banner image<input type='file' accept='image/*' id='pthumb-"+esc(p)+"'/></label><button class='act' data-act='up-thumb' data-product='"+esc(p)+"'>Save thumbnail</button></div>"+
+      "<p class='sub' style='margin-bottom:8px'>Loader preview — drag to position. This is the exact crop customers see.</p>"+
+      "<div class='loader-preview' data-product='"+esc(p)+"'>"+(img||"<span class='sub' style='position:absolute;left:18px;top:40px'>No banner yet</span>")+
+      "<div class='shade'></div><div class='pv-name'>"+esc(p)+"</div><div class='pv-sub'>Lifetime</div><div class='pv-play'></div></div></div>";
   }).join("");
   document.getElementById("usersBody").innerHTML=(data.users||[]).map(u=>
     "<tr><td>"+esc(u.name)+(u.banned?" <span class='bad'>banned</span>":"")+"</td><td><code>"+esc(u.last_ip)+"</code></td><td><code>"+esc(u.ip)+"</code></td><td><code>"+esc(u.hwid)+"</code></td><td>"+esc(u.sub)+"</td><td>"+(u.lifetime?"Lifetime":fmt(u.expires))+"</td><td>"+fmt(u.last_seen)+"</td><td class='acts'>"+
@@ -241,6 +256,32 @@ document.getElementById("gen").onclick=async()=>{
   const made=data.keys||[];
   if(made[0]) navigator.clipboard.writeText(made.length===1?made[0]:made.join("\\n")).catch(()=>{});
 };
+document.addEventListener("pointerdown",e=>{
+  const box=e.target.closest(".loader-preview");
+  if(!box||!box.dataset.product) return;
+  if(!box.querySelector("img")) return;
+  e.preventDefault();
+  try{ box.setPointerCapture(e.pointerId); }catch(_){}
+  const c=crop[box.dataset.product]||{x:0.5,y:0.5};
+  drag={el:box,product:box.dataset.product,x:e.clientX,y:e.clientY,fx:c.x,fy:c.y};
+});
+document.addEventListener("pointermove",e=>{
+  if(!drag) return;
+  const w=Math.max(1,drag.el.clientWidth), h=Math.max(1,drag.el.clientHeight);
+  const fx=Math.min(1,Math.max(0, drag.fx - (e.clientX-drag.x)/w));
+  const fy=Math.min(1,Math.max(0, drag.fy - (e.clientY-drag.y)/h));
+  crop[drag.product]={x:fx,y:fy};
+  const img=drag.el.querySelector("img");
+  if(img) img.style.objectPosition=(fx*100).toFixed(2)+"% "+(fy*100).toFixed(2)+"%";
+});
+document.addEventListener("pointerup",()=>{
+  if(!drag) return;
+  const p=drag.product, c=crop[p];
+  drag=null;
+  if(!c) return;
+  api("/admin/api/product-thumb-focus",{method:"POST",body:JSON.stringify({product:p,focus_x:c.x,focus_y:c.y})}).catch(()=>{});
+});
+document.addEventListener("pointercancel",()=>{ drag=null; });
 document.addEventListener("click", async (e)=>{
   const b=e.target.closest("[data-act]");
   if(!b) return;
@@ -336,10 +377,15 @@ export function registerAdminRoutes(app) {
     for (const row of fileRows.rows) {
       productFiles[row.product] = { name: row.filename, version: row.version, size: row.bytes };
     }
-    const thumbRows = await pool.query(`SELECT product, filename, version FROM product_thumbs`);
+    const thumbRows = await pool.query(`SELECT product, filename, version, focus_x, focus_y FROM product_thumbs`);
     const productThumbs = {};
     for (const row of thumbRows.rows) {
-      productThumbs[row.product] = { name: row.filename, version: row.version };
+      productThumbs[row.product] = {
+        name: row.filename,
+        version: row.version,
+        fx: Number(row.focus_x) || 0.5,
+        fy: Number(row.focus_y) || 0.5,
+      };
     }
     res.json({
       stats: { users: users.rowCount, unused, redeemed, lifetime },
@@ -454,6 +500,28 @@ export function registerAdminRoutes(app) {
         [product, filename, version, mime, req.file.buffer]
       );
       return res.json({ ok: true, name: filename, version });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  app.post("/admin/api/product-thumb-focus", requireAdmin, async (req, res) => {
+    const product = PRODUCTS.includes(req.body?.product) ? req.body.product : "";
+    if (!product) return res.status(400).json({ message: "Invalid product" });
+    let fx = Number(req.body?.focus_x);
+    let fy = Number(req.body?.focus_y);
+    if (!Number.isFinite(fx)) fx = 0.5;
+    if (!Number.isFinite(fy)) fy = 0.5;
+    fx = Math.min(1, Math.max(0, fx));
+    fy = Math.min(1, Math.max(0, fy));
+    try {
+      const upd = await pool.query(
+        `UPDATE product_thumbs SET focus_x = $2, focus_y = $3, updated_at = NOW() WHERE product = $1 RETURNING product`,
+        [product, fx, fy]
+      );
+      if (!upd.rowCount) return res.status(404).json({ message: "No thumbnail" });
+      return res.json({ ok: true, focus_x: fx, focus_y: fy });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ message: "Server error" });

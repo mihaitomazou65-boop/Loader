@@ -570,20 +570,22 @@ void tickLiveProduct() {
     }).detach();
 }
 
-void coverUv(float boxW, float boxH, float imgW, float imgH, ImVec2& uv0, ImVec2& uv1) {
+void coverUv(float boxW, float boxH, float imgW, float imgH, float fx, float fy, ImVec2& uv0, ImVec2& uv1) {
     uv0 = ImVec2(0.f, 0.f);
     uv1 = ImVec2(1.f, 1.f);
     if (boxW < 1.f || boxH < 1.f || imgW < 1.f || imgH < 1.f)
         return;
+    fx = ImClamp(fx, 0.f, 1.f);
+    fy = ImClamp(fy, 0.f, 1.f);
     const float boxA = boxW / boxH;
     const float imgA = imgW / imgH;
     if (imgA > boxA) {
         const float vis = boxA / imgA;
-        uv0.x = (1.f - vis) * 0.5f;
+        uv0.x = (1.f - vis) * fx;
         uv1.x = uv0.x + vis;
     } else {
         const float vis = imgA / boxA;
-        uv0.y = (1.f - vis) * 0.5f;
+        uv0.y = (1.f - vis) * fy;
         uv1.y = uv0.y + vis;
     }
     const float du = 0.75f / imgW;
@@ -617,7 +619,7 @@ void drawFiveMProduct(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
         const float tw = g_liveBanner ? (float)g_liveBannerW : (float)g_fivemBannerW;
         const float th = g_liveBanner ? (float)g_liveBannerH : (float)g_fivemBannerH;
         ImVec2 uv0, uv1;
-        coverUv(iw, ih, tw, th, uv0, uv1);
+        coverUv(iw, ih, tw, th, g_user.thumbFx, g_user.thumbFy, uv0, uv1);
         dl->AddImageRounded((ImTextureID)tex, p0, p1, uv0, uv1, IM_COL32(255, 255, 255, 255), rnd, roundAll);
 
         dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 118), rnd, roundAll);
@@ -721,6 +723,8 @@ void applyAuthResult(const AuthResult& r) {
             if (!r.user.fileVersion.empty())
                 g_user.fileVersion = r.user.fileVersion;
             g_user.thumbVersion = r.user.thumbVersion;
+            g_user.thumbFx = r.user.thumbFx;
+            g_user.thumbFy = r.user.thumbFy;
             g_auth.saveSession(g_token, g_user);
         }
         return;
@@ -736,6 +740,8 @@ void applyAuthResult(const AuthResult& r) {
             g_user.fileVersion = r.user.fileVersion;
         if (!r.user.thumbVersion.empty())
             g_user.thumbVersion = r.user.thumbVersion;
+        g_user.thumbFx = r.user.thumbFx;
+        g_user.thumbFy = r.user.thumbFy;
         g_auth.saveSession(g_token, g_user);
         g_syncTimer = 8.f;
         setStatus(r.message.empty() ? OBF("Key redeemed") : r.message.c_str(), false);

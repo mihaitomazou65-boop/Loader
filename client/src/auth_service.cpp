@@ -56,6 +56,18 @@ std::string jsonText(const json& j, const char* key) {
     return {};
 }
 
+float jsonNum(const json& j, const char* key, float fallback = 0.5f) {
+    if (!j.contains(key))
+        return fallback;
+    const auto& v = j[key];
+    if (v.is_number())
+        return (float)v.get<double>();
+    if (v.is_string()) {
+        try { return std::stof(v.get<std::string>()); } catch (...) { return fallback; }
+    }
+    return fallback;
+}
+
 json parseBody(const std::string& body) {
     if (body.empty())
         return json::object();
@@ -196,6 +208,8 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
                 out.user.fileName = jsonText(u, OBF("file_name"));
                 out.user.fileVersion = jsonText(u, OBF("file_version"));
                 out.user.thumbVersion = jsonText(u, OBF("thumb_version"));
+                out.user.thumbFx = jsonNum(u, OBF("thumb_fx"), 0.5f);
+                out.user.thumbFy = jsonNum(u, OBF("thumb_fy"), 0.5f);
                 if (u.contains(OBF("lifetime")) && u[OBF("lifetime")].is_boolean())
                     out.user.lifetime = u[OBF("lifetime")].get<bool>();
             }
@@ -307,7 +321,9 @@ bool AuthService::saveSession(const std::string& token, const AuthUser& user) {
             {OBF("expires"), user.expires},
             {OBF("file_name"), user.fileName},
             {OBF("file_version"), user.fileVersion},
-            {OBF("thumb_version"), user.thumbVersion}};
+            {OBF("thumb_version"), user.thumbVersion},
+            {OBF("thumb_fx"), user.thumbFx},
+            {OBF("thumb_fy"), user.thumbFy}};
         return session_crypto::writeEncryptedFile(sessionPath(), j.dump());
     } catch (...) {
         return false;
@@ -339,6 +355,8 @@ bool AuthService::loadSession(std::string& tokenOut, AuthUser& userOut) {
         userOut.fileName = jsonText(j, OBF("file_name"));
         userOut.fileVersion = jsonText(j, OBF("file_version"));
         userOut.thumbVersion = jsonText(j, OBF("thumb_version"));
+        userOut.thumbFx = jsonNum(j, OBF("thumb_fx"), 0.5f);
+        userOut.thumbFy = jsonNum(j, OBF("thumb_fy"), 0.5f);
         if (j.contains(OBF("lifetime")) && j[OBF("lifetime")].is_boolean())
             userOut.lifetime = j[OBF("lifetime")].get<bool>();
         return !tokenOut.empty();
