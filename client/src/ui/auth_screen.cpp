@@ -67,6 +67,9 @@ ID3D11ShaderResourceView* g_liveBanner = nullptr;
 int g_liveBannerW = 0;
 int g_liveBannerH = 0;
 std::string g_loadedThumbVer;
+std::string g_loadedThumbProduct;
+float g_loadedThumbFx = 0.5f;
+float g_loadedThumbFy = 0.5f;
 std::atomic<bool> g_syncBusy{false};
 float g_syncTimer = 8.f;
 std::mutex g_thumbBytesMu;
@@ -269,11 +272,39 @@ std::wstring cleanedFiveMExe() {
     return utf8ToWide(p);
 }
 
-void launchFiveM();
+std::wstring productDirName(const std::string& product) {
+    std::string safe;
+    for (char c : product) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_')
+            safe += c;
+        else if (c == '.')
+            safe += '_';
+    }
+    while (!safe.empty() && safe.front() == ' ')
+        safe.erase(safe.begin());
+    while (!safe.empty() && safe.back() == ' ')
+        safe.pop_back();
+    if (safe.empty())
+        safe = "Product";
+    return utf8ToWide(safe);
+}
+
+void resetLiveBanner() {
+    if (g_liveBanner) {
+        g_liveBanner->Release();
+        g_liveBanner = nullptr;
+    }
+    g_liveBannerW = 0;
+    g_liveBannerH = 0;
+    g_loadedThumbVer.clear();
+    g_loadedThumbProduct.clear();
+}
+
+void launchProduct();
 bool hasActiveProduct();
 void tickLiveProduct();
 
-void launchFiveM() {
+void launchProduct() {
     if (g_playBusy.load())
         return;
     if (!hasActiveProduct())
@@ -306,11 +337,12 @@ void launchFiveM() {
         if (!product.empty() && !token.empty()) {
             wchar_t app[MAX_PATH]{};
             SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, app);
+            const std::wstring prodDir = productDirName(product);
             const std::wstring dir =
-                std::wstring(app) + OBFW(L"\\Loader\\products\\FiveM\\") + utf8ToWide(ver);
+                std::wstring(app) + OBFW(L"\\Loader\\products\\") + prodDir + L"\\" + utf8ToWide(ver);
             CreateDirectoryW((std::wstring(app) + OBFW(L"\\Loader")).c_str(), nullptr);
             CreateDirectoryW((std::wstring(app) + OBFW(L"\\Loader\\products")).c_str(), nullptr);
-            CreateDirectoryW((std::wstring(app) + OBFW(L"\\Loader\\products\\FiveM")).c_str(), nullptr);
+            CreateDirectoryW((std::wstring(app) + OBFW(L"\\Loader\\products\\") + prodDir).c_str(), nullptr);
             CreateDirectoryW(dir.c_str(), nullptr);
             dest = dir + L"\\" + utf8ToWide(name);
             {
@@ -526,6 +558,9 @@ void applyPendingThumb() {
     g_liveBannerW = w;
     g_liveBannerH = h;
     g_loadedThumbVer = ver;
+    g_loadedThumbProduct = g_user.product;
+    g_loadedThumbFx = g_user.thumbFx;
+    g_loadedThumbFy = g_user.thumbFy;
 }
 
 void tickLiveProduct() {
@@ -533,14 +568,17 @@ void tickLiveProduct() {
     if (g_view != View::LoggedIn || g_token.empty() || g_syncBusy.load())
         return;
     g_syncTimer += ImGui::GetIO().DeltaTime;
-    const bool needThumb = hasActiveProduct() && !g_user.thumbVersion.empty() && g_user.thumbVersion != g_loadedThumbVer;
-    if (!needThumb && g_syncTimer < 8.f)
+    const bool needPoll = g_syncTimer >= 8.f;
+    const bool needImage = hasActiveProduct() && !g_user.thumbVersion.empty()
+        && (g_user.product != g_loadedThumbProduct || g_user.thumbVersion != g_loadedThumbVer);
+    if (!needPoll && !needImage)
         return;
     g_syncTimer = 0.f;
     g_syncBusy.store(true);
     const std::string token = g_token;
-    const std::string loaded = g_loadedThumbVer;
-    std::thread([token, loaded] {
+    const std::string loadedVer = g_loadedThumbVer;
+    const std::string loadedProd = g_loadedThumbProduct;
+    std::thread([token, loadedVer, loadedProd] {
         AuthService svc;
         AuthResult r;
         try {
@@ -554,7 +592,8 @@ void tickLiveProduct() {
             g_pending = r;
             g_gotResult = true;
         }
-        if (r.ok && !r.user.product.empty() && !r.user.thumbVersion.empty() && r.user.thumbVersion != loaded) {
+        if (r.ok && !r.user.product.empty() && !r.user.thumbVersion.empty()
+            && (r.user.product != loadedProd || r.user.thumbVersion != loadedVer)) {
             try {
                 const HttpResponse img = HttpClient::request(OBFW(L"GET"), OBFW(L"/auth/product-thumb"), {}, token);
                 if (img.status >= 200 && img.status < 300 && !img.body.empty()) {
@@ -596,8 +635,9 @@ void coverUv(float boxW, float boxH, float imgW, float imgH, float fx, float fy,
     uv1.y -= dv;
 }
 
-void drawFiveMProduct(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
-    ensureFiveMBanner();
+void drawProductCard(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
+    if (g_user.product == OBF("FiveM"))
+        ensureFiveMBanner();
     const float cardW = ws.x - 32.f;
     const float cardH = 108.f;
     const float rnd = 12.f;
@@ -614,8 +654,9 @@ void drawFiveMProduct(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
 
     dl->AddRectFilled(p0, p1, IM_COL32(10, 10, 12, 255), rnd, roundAll);
 
-    if (g_fivemBanner || g_liveBanner) {
-        ID3D11ShaderResourceView* tex = g_liveBanner ? g_liveBanner : g_fivemBanner;
+    ID3D11ShaderResourceView* fallback = (g_user.product == OBF("FiveM")) ? g_fivemBanner : nullptr;
+    if (g_liveBanner || fallback) {
+        ID3D11ShaderResourceView* tex = g_liveBanner ? g_liveBanner : fallback;
         const float tw = g_liveBanner ? (float)g_liveBannerW : (float)g_fivemBannerW;
         const float th = g_liveBanner ? (float)g_liveBannerH : (float)g_fivemBannerH;
         ImVec2 uv0, uv1;
@@ -634,11 +675,12 @@ void drawFiveMProduct(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
         ImGui::PushFont(font::brand_font);
     ImGui::SetCursorScreenPos(ImVec2(title.x + 1.f, title.y + 1.f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.f, 0.f, 0.f, 0.72f));
-    ImGui::TextUnformatted(OBF("FiveM"));
+    const char* prodLabel = g_user.product.empty() ? OBF("Product") : g_user.product.c_str();
+    ImGui::TextUnformatted(prodLabel);
     ImGui::PopStyleColor();
     ImGui::SetCursorScreenPos(title);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-    ImGui::TextUnformatted(OBF("FiveM"));
+    ImGui::TextUnformatted(prodLabel);
     ImGui::PopStyleColor();
     if (font::brand_font)
         ImGui::PopFont();
@@ -657,8 +699,10 @@ void drawFiveMProduct(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
     const ImVec2 b1(b0.x + box, b0.y + box);
     ImGui::SetCursorScreenPos(b0);
     ImGui::BeginDisabled(g_playBusy.load());
-    if (ImGui::InvisibleButton(OBF("play_fivem"), ImVec2(box, box)))
-        launchFiveM();
+    char playId[96]{};
+    std::snprintf(playId, sizeof(playId), "play_%s", g_user.product.c_str());
+    if (ImGui::InvisibleButton(playId, ImVec2(box, box)))
+        launchProduct();
     ImGui::EndDisabled();
     const bool hov = ImGui::IsItemHovered();
     dl->AddRectFilled(b0, b1, hov ? IM_COL32(58, 60, 66, 255) : IM_COL32(42, 44, 50, 255), boxR, roundAll);
@@ -722,6 +766,9 @@ void applyAuthResult(const AuthResult& r) {
                 g_user.fileName = r.user.fileName;
             if (!r.user.fileVersion.empty())
                 g_user.fileVersion = r.user.fileVersion;
+            if (g_user.product != r.user.product)
+                resetLiveBanner();
+            g_user.product = r.user.product;
             g_user.thumbVersion = r.user.thumbVersion;
             g_user.thumbFx = r.user.thumbFx;
             g_user.thumbFy = r.user.thumbFy;
@@ -730,6 +777,8 @@ void applyAuthResult(const AuthResult& r) {
         return;
     }
     if (g_view == View::LoggedIn) {
+        if (!r.user.product.empty() && g_user.product != r.user.product)
+            resetLiveBanner();
         if (!r.user.product.empty())
             g_user.product = r.user.product;
         g_user.lifetime = r.user.lifetime;
@@ -751,6 +800,7 @@ void applyAuthResult(const AuthResult& r) {
     }
     g_token = r.token;
     g_user = r.user;
+    resetLiveBanner();
     g_auth.saveSession(g_token, g_user);
     g_view = View::LoggedIn;
     setStatus("", false);
@@ -937,7 +987,7 @@ void drawAuthScreen() {
                 g_redeemOpen = true;
 
             if (hasActiveProduct())
-                drawFiveMProduct(dl, wp, ws);
+                drawProductCard(dl, wp, ws);
 
             if (g_redeemOpen) {
                 const ImVec2 box(340.f, 198.f);

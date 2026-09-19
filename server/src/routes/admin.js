@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "crypto";
 import multer from "multer";
 import { pool } from "../db.js";
-import { DURATIONS, PRODUCTS, durationByCode } from "../util/duration.js";
+import { DURATIONS, PRODUCTS, defaultProduct, durationByCode, isProduct, productTag } from "../util/duration.js";
 import { adminSecretOk, clientIp, isAdminRequest, setAdminCookie } from "../util/ip.js";
 
 function pepper() {
@@ -23,7 +23,7 @@ function makeKey(product) {
   let body = "";
   for (let i = 0; i < n; i++) body += alphabet[bytes[i] % alphabet.length];
   const groups = [body.slice(0, 4), body.slice(4, 8), body.slice(8, 12), body.slice(12, 16)];
-  const tag = String(product || "FIVEM").replace(/[^A-Z0-9]/gi, "").slice(0, 6).toUpperCase() || "FIVEM";
+  const tag = productTag(product);
   return `${tag}-${groups.join("-")}`;
 }
 
@@ -134,8 +134,8 @@ const PAGE = `<!doctype html>
   </div>
 </aside>
 <main>
-  <h1>FiveM</h1>
-  <p class="sub">Private seller panel. Keys, durations, and live user IPs.</p>
+  <h1>Loader</h1>
+  <p class="sub">Products, keys, files, and banners. Changes go live in the client.</p>
   <section id="dash">
     <div class="stats">
       <div class="stat"><span>Users</span><b id="sUsers">0</b></div>
@@ -299,7 +299,7 @@ document.addEventListener("click", async (e)=>{
       setTimeout(()=>{ b.textContent="Copy"; }, 900);
       return;
     } else if(act==="up-file"){
-      const product=b.dataset.product||"FiveM";
+      const product=b.dataset.product||P[0];
       const inp=document.getElementById("pfile-"+product);
       const f=inp&&inp.files&&inp.files[0];
       if(!f){ alert("Pick a file for "+product+" first"); return; }
@@ -311,7 +311,7 @@ document.addEventListener("click", async (e)=>{
       await load();
       return;
     } else if(act==="up-thumb"){
-      const product=b.dataset.product||"FiveM";
+      const product=b.dataset.product||P[0];
       const inp=document.getElementById("pthumb-"+product);
       const f=inp&&inp.files&&inp.files[0];
       if(!f){ alert("Pick a thumbnail for "+product+" first"); return; }
@@ -409,7 +409,7 @@ export function registerAdminRoutes(app) {
           id: r.id,
           prefix: String(r.prefix || "").replace(/-+$/g, ""),
           key: String(r.prefix || "").replace(/-+$/g, ""),
-          product: r.product || "FiveM",
+          product: r.product || P[0],
           duration: d.label,
           redeemed: Boolean(r.redeemed_at),
           cancelled: Boolean(r.cancelled_at),
@@ -426,7 +426,7 @@ export function registerAdminRoutes(app) {
     let count = Number(req.body?.count || 1);
     if (!Number.isFinite(count) || count < 1) count = 1;
     if (count > 50) count = 50;
-    const product = PRODUCTS.includes(req.body?.product) ? req.body.product : "FiveM";
+    const product = isProduct(req.body?.product) ? req.body.product : defaultProduct();
     const dur = durationByCode(req.body?.duration);
     const note = String(req.body?.note || "").slice(0, 80);
     const made = [];
@@ -447,7 +447,7 @@ export function registerAdminRoutes(app) {
       if (!req.file || !req.file.buffer || !req.file.buffer.length) {
         return res.status(400).json({ message: "No file" });
       }
-      const product = PRODUCTS.includes(req.body?.product) ? req.body.product : "FiveM";
+      const product = isProduct(req.body?.product) ? req.body.product : defaultProduct();
       const filename = String(req.file.originalname || "product.exe").replace(/[^\w.\-]+/g, "_").slice(0, 80);
       const version = String(Date.now());
       await pool.query(
@@ -464,7 +464,7 @@ export function registerAdminRoutes(app) {
   });
 
   app.get("/admin/api/product-thumb", requireAdmin, async (req, res) => {
-    const product = PRODUCTS.includes(req.query?.product) ? req.query.product : "FiveM";
+    const product = isProduct(req.query?.product) ? req.query.product : defaultProduct();
     try {
       const file = await pool.query(
         `SELECT filename, mime, data FROM product_thumbs WHERE product = $1`,
@@ -486,7 +486,7 @@ export function registerAdminRoutes(app) {
       if (!req.file || !req.file.buffer || !req.file.buffer.length) {
         return res.status(400).json({ message: "No file" });
       }
-      const product = PRODUCTS.includes(req.body?.product) ? req.body.product : "FiveM";
+      const product = isProduct(req.body?.product) ? req.body.product : defaultProduct();
       const filename = String(req.file.originalname || "thumb.jpg").replace(/[^\w.\-]+/g, "_").slice(0, 80);
       const mime = thumbMime(filename, req.file.mimetype);
       if (!mime.startsWith("image/")) {
@@ -507,7 +507,7 @@ export function registerAdminRoutes(app) {
   });
 
   app.post("/admin/api/product-thumb-focus", requireAdmin, async (req, res) => {
-    const product = PRODUCTS.includes(req.body?.product) ? req.body.product : "";
+    const product = isProduct(req.body?.product) ? req.body.product : "";
     if (!product) return res.status(400).json({ message: "Invalid product" });
     let fx = Number(req.body?.focus_x);
     let fy = Number(req.body?.focus_y);

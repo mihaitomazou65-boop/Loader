@@ -2,7 +2,7 @@
 import { pool } from "../db.js";
 import { authMiddleware, signToken } from "../middleware/auth.js";
 import { clientIp, isPrivateIp } from "../util/ip.js";
-import { durationByCode } from "../util/duration.js";
+import { defaultProduct, durationByCode } from "../util/duration.js";
 import { hashKey } from "./admin.js";
 
 function readName(body) {
@@ -272,16 +272,17 @@ export function registerAuthRoutes(app) {
 
       await client.query(
         `UPDATE users SET sub_product = $1, sub_expires_at = $2, sub_lifetime = $3 WHERE id = $4`,
-        [key.product || "FiveM", expiresSql, lifetime, req.user.id]
+        [key.product || defaultProduct(), expiresSql, lifetime, req.user.id]
       );
       const fresh = await client.query(
         `SELECT id, email, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
         [req.user.id]
       );
       await client.query("COMMIT");
+      const prod = key.product || defaultProduct();
       return res.json({
         ok: true,
-        message: lifetime ? "FiveM lifetime redeemed" : "FiveM key redeemed",
+        message: lifetime ? `${prod} lifetime redeemed` : `${prod} key redeemed`,
         user: await withProductFile(fresh.rows[0]),
       });
     } catch (err) {
