@@ -82,6 +82,8 @@ const PAGE = `<!doctype html>
   button.danger { background:#3a1518; color:#ffb4b4; border:1px solid #5a2428; border-radius:8px; cursor:pointer; }
   .bad { color:#ff6b6b; }
   .acts { white-space:nowrap; }
+  .keycell { display:flex; align-items:center; gap:8px; }
+  .keycell code { flex:1; }
   table { width:100%; border-collapse:collapse; margin-top:8px; }
   th, td { text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); font-size:12px; }
   th { color:var(--muted); font-weight:500; }
@@ -182,8 +184,7 @@ async function load(){
   ).join("")||"<tr><td colspan=8>No users</td></tr>";
   document.getElementById("keys").innerHTML=(data.keys||[]).map(k=>{
     const full=k.key||k.prefix||"";
-    return "<tr><td><code>"+esc(full)+"</code></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td>"+keyStatus(k)+"</td><td>"+(k.lifetime?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td><td class='acts'>"+
-    "<button class='ghost tiny' data-act='copy-key' data-key='"+esc(full)+"'>Copy</button>"+
+    return "<tr><td><div class='keycell'><code>"+esc(full)+"</code><button class='ghost tiny' data-act='copy-key' data-key='"+esc(full)+"'>Copy</button></div></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td>"+keyStatus(k)+"</td><td>"+(k.lifetime?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td><td class='acts'>"+
     (k.cancelled?"":"<button class='ghost tiny' data-act='cancel-key' data-id='"+esc(k.id)+"'>Cancel</button>")+
     "<button class='danger tiny' data-act='del-key' data-id='"+esc(k.id)+"'>Delete</button></td></tr>";
   }).join("")||"<tr><td colspan=8>No keys</td></tr>";
@@ -207,7 +208,15 @@ document.addEventListener("click", async (e)=>{
   const act=b.dataset.act, id=b.dataset.id;
   try{
     if(act==="copy-key"){
-      await navigator.clipboard.writeText(b.dataset.key||"");
+      const t=b.dataset.key||"";
+      try{ await navigator.clipboard.writeText(t); }
+      catch(_){
+        const i=document.createElement("textarea");
+        i.value=t; document.body.appendChild(i); i.select();
+        document.execCommand("copy"); i.remove();
+      }
+      b.textContent="Copied";
+      setTimeout(()=>{ b.textContent="Copy"; }, 900);
       return;
     } else if(act==="cancel-key"){
       if(!confirm("Cancel this key? It can never be redeemed, and the user's product is removed if it was already used.")) return;
