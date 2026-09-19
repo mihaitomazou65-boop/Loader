@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "crypto";
 import { pool } from "../db.js";
-import { adminIps, clientIp, isAdminIp } from "../util/ip.js";
+import { adminSecretOk, clientIp, isAdminRequest, setAdminCookie } from "../util/ip.js";
 
 function pepper() {
   return process.env.JWT_SECRET || "loader";
@@ -16,12 +16,13 @@ function makeKey() {
   return `LOAD-${hex.slice(0, 4)}-${hex.slice(4, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}`;
 }
 
-function deny(res) {
+function deny(req, res) {
+  console.warn("admin deny ip=", clientIp(req), "xff=", req.headers["x-forwarded-for"] || "");
   res.status(404).type("text/plain").send("Not found");
 }
 
 function requireAdmin(req, res, next) {
-  if (!isAdminIp(req)) return deny(res);
+  if (!isAdminRequest(req)) return deny(req, res);
   next();
 }
 
@@ -106,8 +107,11 @@ load().catch((e) => { document.body.innerHTML = "<main>Failed to load</main>"; }
 
 export function registerAdminRoutes(app) {
   app.get("/admin", (req, res) => {
-    if (!adminIps().length) return deny(res);
-    if (!isAdminIp(req)) return deny(res);
+    if (!isAdminRequest(req)) return deny(req, res);
+    if (adminSecretOk(req)) setAdminCookie(res);
+    if (req.query.k || req.query.secret) {
+      return res.redirect(302, "/admin");
+    }
     res.set("Cache-Control", "no-store");
     res.set("X-Robots-Tag", "noindex, nofollow");
     res.type("html").send(PAGE);
