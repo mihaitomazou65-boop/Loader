@@ -113,20 +113,22 @@ const PAGE = `<!doctype html>
   <h1>FiveM</h1>
   <p class="sub">Private seller panel. Keys, durations, and live user IPs.</p>
   <section id="dash">
-    <div class="stats">
-      <div class="stat"><span>Users</span><b id="sUsers">0</b></div>
-      <div class="stat"><span>Unused keys</span><b id="sUnused">0</b></div>
-      <div class="stat"><span>Redeemed</span><b id="sUsed">0</b></div>
-      <div class="stat"><span>Lifetime</span><b id="sLife">0</b></div>
-    </div>
     <div class="card">
+      <h3 style="margin:0 0 10px">Upload product file here</h3>
+      <p class="sub">This is the .exe customers get when they click Play.</p>
       <div class="row">
-        <label>FiveM product file
+        <label>Choose file
           <input id="pfile" type="file"/>
         </label>
         <button class="act" id="upfile">Save file</button>
       </div>
       <p class="sub" id="pfileinfo">No file yet</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><span>Users</span><b id="sUsers">0</b></div>
+      <div class="stat"><span>Unused keys</span><b id="sUnused">0</b></div>
+      <div class="stat"><span>Redeemed</span><b id="sUsed">0</b></div>
+      <div class="stat"><span>Lifetime</span><b id="sLife">0</b></div>
     </div>
   </section>
   <section id="licenses" class="hide">
