@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server/src/index.js",
-    "dev": "node --watch server/src/index.js"
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
   },
   "engines": {
     "node": "20.x"
