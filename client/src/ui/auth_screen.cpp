@@ -11,6 +11,7 @@
 #include "imgui_internal.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -27,20 +28,29 @@ View g_view = View::Form;
 AuthMode g_mode = AuthMode::Login;
 std::atomic<bool> g_busy{false};
 bool g_wantSubmit = false;
+bool g_wantRedeem = false;
+bool g_redeemOpen = false;
+std::atomic<bool> g_redeemBusy{false};
+char g_key[48]{};
 bool g_error = false;
 char g_name[64]{};
 char g_password[128]{};
 char g_status[256]{};
 std::string g_token;
 AuthUser g_user;
-bool g_sessionChecked = false;
 bool g_fontsReady = false;
 std::mutex g_resultMu;
 bool g_gotResult = false;
 AuthResult g_pending;
+float g_expand = 0.f;
+float g_spinAlpha = 0.f;
 
 constexpr float kRound = 12.f;
 constexpr float kFieldH = 34.f;
+constexpr int kLoginW = 360;
+constexpr int kLoginH = 356;
+constexpr int kMainW = 648;
+constexpr int kMainH = 392;
 
 ImU32 col32(const ImColor& c) {
     return ImGui::GetColorU32(utils::ImColorToImVec4(c));
@@ -116,26 +126,67 @@ void field(const char* caption, const char* id, char* buf, int bufSize, float wi
     ImGui::PopID();
 }
 
-void tryRestoreSession() {
-    if (g_sessionChecked)
-        return;
-    g_sessionChecked = true;
-    try {
-        std::string token;
-        AuthUser user;
-        if (!g_auth.loadSession(token, user))
-            return;
-        g_token = token;
-        g_user = user;
-        g_view = View::LoggedIn;
-    } catch (...) {
-        g_auth.clearSession();
+void drawCloseX(ImDrawList* dl) {
+    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - 36.f, ImGui::GetWindowPos().y + 10.f));
+    if (ImGui::InvisibleButton("close", ImVec2(22.f, 22.f), ImGuiButtonFlags_PressedOnClick)) {
+        if (g_app.hwnd)
+            DestroyWindow(g_app.hwnd);
+        ExitProcess(0);
     }
+    const ImVec2 mn = ImGui::GetItemRectMin();
+    const ImVec2 mx = ImGui::GetItemRectMax();
+    const float cx = IM_ROUND((mn.x + mx.x) * 0.5f) + 0.5f;
+    const float cy = IM_ROUND((mn.y + mx.y) * 0.5f) + 0.5f;
+    const float r = 4.0f;
+    const ImU32 xc = ImGui::IsItemHovered() ? IM_COL32(235, 235, 235, 255) : IM_COL32(140, 140, 140, 255);
+    dl->AddLine(ImVec2(cx - r, cy - r), ImVec2(cx + r, cy + r), xc, 1.2f);
+    dl->AddLine(ImVec2(cx + r, cy - r), ImVec2(cx - r, cy + r), xc, 1.2f);
+}
+
+void drawSpinner(ImDrawList* dl, ImVec2 center, float radius, float alpha) {
+    alpha = ImClamp(alpha, 0.f, 1.f);
+    const float t = (float)ImGui::GetTime() * 2.55f;
+    dl->PathArcTo(center, radius, 0.f, IM_PI * 2.f, 48);
+    dl->PathStroke(IM_COL32(255, 255, 255, (int)(22.f * alpha)), ImDrawFlags_None, 2.0f);
+    dl->PathArcTo(center, radius, t, t + 1.35f, 28);
+    dl->PathStroke(IM_COL32(232, 232, 232, (int)(235.f * alpha)), ImDrawFlags_None, 2.35f);
+}
+
+void tickWindowExpand() {
+    const float dt = ImGui::GetIO().DeltaTime;
+    const float target = (g_view == View::LoggedIn) ? 1.f : 0.f;
+    const float speed = 2.35f;
+    if (g_expand < target)
+        g_expand = ImMin(target, g_expand + dt * speed);
+    else if (g_expand > target)
+        g_expand = ImMax(target, g_expand - dt * speed);
+
+    const float t = g_expand;
+    const float e = 1.f - (1.f - t) * (1.f - t) * (1.f - t);
+    const int w = (int)IM_ROUND(ImLerp((float)kLoginW, (float)kMainW, e));
+    const int h = (int)IM_ROUND(ImLerp((float)kLoginH, (float)kMainH, e));
+    g_app.setClientSizeCentered(w, h);
+}
+
+void tickSpinner(bool loading) {
+    const float dt = ImGui::GetIO().DeltaTime;
+    const float target = loading ? 1.f : 0.f;
+    const float speed = loading ? 3.8f : 1.85f;
+    if (g_spinAlpha < target)
+        g_spinAlpha = ImMin(target, g_spinAlpha + dt * speed);
+    else if (g_spinAlpha > target)
+        g_spinAlpha = ImMax(target, g_spinAlpha - dt * speed);
 }
 
 void applyAuthResult(const AuthResult& r) {
     if (!r.ok) {
         setStatus(r.message.empty() ? "Wrong name or password" : r.message.c_str(), true);
+        return;
+    }
+    if (g_view == View::LoggedIn) {
+        setStatus(r.message.empty() ? "Key redeemed" : r.message.c_str(), false);
+        std::memset(g_key, 0, sizeof(g_key));
+        g_redeemOpen = false;
         return;
     }
     g_token = r.token;
@@ -172,7 +223,7 @@ void submitAuth() {
     }
 
     g_busy.store(true);
-    setStatus("Please wait...", false);
+    setStatus("", false);
     const bool signup = g_mode == AuthMode::SignUp;
     std::thread([name, password, signup] {
         AuthResult r;
@@ -192,6 +243,35 @@ void submitAuth() {
     }).detach();
 }
 
+void submitRedeem() {
+    if (g_redeemBusy.load() || g_token.empty())
+        return;
+    const std::string key = g_key;
+    if (key.size() < 10) {
+        setStatus("Invalid key", true);
+        return;
+    }
+    g_redeemBusy.store(true);
+    setStatus("", false);
+    const std::string token = g_token;
+    std::thread([key, token] {
+        AuthResult r;
+        try {
+            AuthService svc;
+            r = svc.redeem(token, key);
+        } catch (...) {
+            r.ok = false;
+            r.message = "Redeem failed";
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_resultMu);
+            g_pending = r;
+            g_gotResult = true;
+        }
+        g_redeemBusy.store(false);
+    }).detach();
+}
+
 } // namespace
 
 void initTheme() {
@@ -201,8 +281,8 @@ void initTheme() {
 
 void drawAuthScreen() {
     try {
-        tryRestoreSession();
         c::enforce_mono_theme();
+        tickWindowExpand();
 
         const ImVec2 display = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowPos(ImVec2(0.f, 0.f), ImGuiCond_Always);
@@ -218,45 +298,25 @@ void drawAuthScreen() {
         const ImVec2 ws = ImGui::GetWindowSize();
         dl->AddRectFilled(wp, wp + ws, col32(c::window_bg_color));
 
-        if (font::esp_font)
-            ImGui::PushFont(font::esp_font);
+        const bool busy = g_busy.load();
+        const bool loading = busy || (g_view == View::LoggedIn && g_expand < 0.995f);
+        tickSpinner(loading);
+        const bool showForm = (g_view == View::Form && !busy);
 
-        if (font::brand_font)
-            ImGui::PushFont(font::brand_font);
-        ImGui::TextUnformatted(LOADER_BRAND);
-        if (font::brand_font)
-            ImGui::PopFont();
+        if (showForm) {
+            if (font::esp_font)
+                ImGui::PushFont(font::esp_font);
 
-        ImGui::SameLine(ImGui::GetWindowWidth() - 34.f);
-        if (ImGui::InvisibleButton("close", ImVec2(20.f, 20.f)))
-            PostQuitMessage(0);
-        {
-            const ImVec2 mn = ImGui::GetItemRectMin();
-            const ImVec2 mx = ImGui::GetItemRectMax();
-            const ImU32 xc = ImGui::IsItemHovered() ? col32(c::text::label::active) : col32(c::text::label::default);
-            dl->AddLine(ImVec2(mn.x + 5.f, mn.y + 5.f), ImVec2(mx.x - 5.f, mx.y - 5.f), xc, 1.5f);
-            dl->AddLine(ImVec2(mx.x - 5.f, mn.y + 5.f), ImVec2(mn.x + 5.f, mx.y - 5.f), xc, 1.5f);
-        }
+            ImGui::SetCursorPos(ImVec2(16.f, 12.f));
+            if (font::brand_font)
+                ImGui::PushFont(font::brand_font);
+            ImGui::TextUnformatted(LOADER_BRAND);
+            if (font::brand_font)
+                ImGui::PopFont();
 
-        ImGui::Dummy(ImVec2(0.f, 8.f));
-        const float inner_w = ImGui::GetContentRegionAvail().x;
+            ImGui::Dummy(ImVec2(0.f, 8.f));
+            const float inner_w = ImGui::GetContentRegionAvail().x;
 
-        if (g_view == View::LoggedIn) {
-            ImGui::TextUnformatted("Welcome");
-            ImGui::PushStyleColor(ImGuiCol_Text, utils::ImColorToImVec4(c::text::label::default));
-            ImGui::TextUnformatted(g_user.email.empty() ? "signed in" : g_user.email.c_str());
-            ImGui::PopStyleColor();
-            ImGui::Dummy(ImVec2(0.f, 6.f));
-            if (custom::Button("Continue", ImVec2(inner_w, 36.f)))
-                setStatus("", false);
-            if (custom::Button("Log out", ImVec2(inner_w, 36.f))) {
-                g_auth.clearSession();
-                g_token.clear();
-                g_user = {};
-                g_view = View::Form;
-                setStatus("", false);
-            }
-        } else {
             const float gap = 8.f;
             const float half = (inner_w - gap) * 0.5f;
             if (custom::Tab("Log in", g_mode == AuthMode::Login, ImVec2(half, 32.f)))
@@ -271,28 +331,72 @@ void drawAuthScreen() {
             field("Password", "pass", g_password, IM_ARRAYSIZE(g_password), inner_w, ImGuiInputTextFlags_Password);
 
             ImGui::Dummy(ImVec2(0.f, 10.f));
-            ImGui::BeginDisabled(g_busy.load());
             if (custom::Button(g_mode == AuthMode::Login ? "Sign in" : "Create account", ImVec2(inner_w, 36.f)))
                 g_wantSubmit = true;
-            ImGui::EndDisabled();
+
+            ImGui::Dummy(ImVec2(0.f, 8.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, g_error
+                ? ImVec4(0.91f, 0.28f, 0.28f, 1.f)
+                : utils::ImColorToImVec4(c::text::label::default));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + inner_w);
+            ImGui::TextUnformatted(g_status[0] ? g_status : " ");
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+
+            if (font::esp_font)
+                ImGui::PopFont();
+        }
+        if (g_spinAlpha > 0.01f) {
+            drawSpinner(dl, wp + ws * 0.5f, ImLerp(12.f, 18.f, g_expand), g_spinAlpha);
         }
 
-        ImGui::Dummy(ImVec2(0.f, 8.f));
-        ImGui::PushStyleColor(ImGuiCol_Text, g_error
-            ? ImVec4(0.91f, 0.28f, 0.28f, 1.f)
-            : utils::ImColorToImVec4(c::text::label::default));
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + inner_w);
-        ImGui::TextUnformatted(g_status[0] ? g_status : " ");
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
+        if (g_view == View::LoggedIn && g_expand > 0.97f && g_spinAlpha < 0.25f) {
+            ImGui::SetCursorScreenPos(ImVec2(wp.x + 14.f, wp.y + 10.f));
+            if (custom::Button("Redeem key", ImVec2(112.f, 28.f)))
+                g_redeemOpen = true;
 
-        if (font::esp_font)
-            ImGui::PopFont();
+            if (g_redeemOpen) {
+                const ImVec2 box(320.f, 168.f);
+                const ImVec2 p0 = wp + (ws - box) * 0.5f;
+                const ImVec2 p1 = p0 + box;
+                dl->AddRectFilled(p0, p1, IM_COL32(14, 14, 14, 255), 10.f);
+                dl->AddRect(p0, p1, IM_COL32(48, 48, 48, 255), 10.f, 0, 1.f);
+                ImGui::SetCursorScreenPos(p0 + ImVec2(16.f, 14.f));
+                ImGui::BeginGroup();
+                ImGui::TextUnformatted("Redeem key");
+                ImGui::Dummy(ImVec2(0.f, 8.f));
+                ImGui::PushID("redeemkey");
+                ImGui::InputTextEx("", "", g_key, IM_ARRAYSIZE(g_key), ImVec2(box.x - 32.f, 34.f), 0);
+                ImGui::PopID();
+                ImGui::Dummy(ImVec2(0.f, 10.f));
+                ImGui::BeginDisabled(g_redeemBusy.load());
+                if (custom::Button("Redeem", ImVec2(140.f, 32.f)))
+                    g_wantRedeem = true;
+                ImGui::EndDisabled();
+                ImGui::SameLine(0.f, 8.f);
+                if (custom::Button("Close", ImVec2(120.f, 32.f)))
+                    g_redeemOpen = false;
+                ImGui::Dummy(ImVec2(0.f, 6.f));
+                ImGui::PushStyleColor(ImGuiCol_Text, g_error
+                    ? ImVec4(0.91f, 0.28f, 0.28f, 1.f)
+                    : utils::ImColorToImVec4(c::text::label::default));
+                ImGui::TextUnformatted(g_status[0] ? g_status : " ");
+                ImGui::PopStyleColor();
+                ImGui::EndGroup();
+            }
+        }
+
+        drawCloseX(dl);
+
         ImGui::End();
 
         if (g_wantSubmit) {
             g_wantSubmit = false;
             submitAuth();
+        }
+        if (g_wantRedeem) {
+            g_wantRedeem = false;
+            submitRedeem();
         }
         pumpAuthResults();
     } catch (...) {

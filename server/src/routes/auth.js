@@ -1,6 +1,8 @@
 ﻿import bcrypt from "bcryptjs";
 import { pool } from "../db.js";
 import { authMiddleware, signToken } from "../middleware/auth.js";
+import { clientIp } from "../util/ip.js";
+import { hashKey } from "./admin.js";
 
 function readName(body) {
   const raw = body?.name ?? body?.email ?? "";
@@ -19,11 +21,6 @@ function readHwid(body) {
   const h = String(body?.hwid || "").trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(h)) return "";
   return h;
-}
-
-function clientIp(req) {
-  const raw = String(req.ip || "").split(",")[0].trim();
-  return raw.replace(/^::ffff:/i, "");
 }
 
 function bindConflict(row, hwid, ip) {
@@ -150,6 +147,46 @@ export function registerAuthRoutes(app) {
         return res.status(403).json({ message: "Account locked to another network" });
       }
       return res.json({ user: { id: user.id, name: user.email } });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  app.post("/auth/redeem", authMiddleware, async (req, res) => {
+    try {
+      const raw = String(req.body?.key || "").trim().toUpperCase().replace(/\s+/g, "");
+      if (raw.length < 10 || raw.length > 40) {
+        return res.status(400).json({ message: "Invalid key" });
+      }
+      const ip = clientIp(req);
+      const userRow = await pool.query(
+        `SELECT id, bind_ip FROM users WHERE id = $1`,
+        [req.user.id]
+      );
+      const user = userRow.rows[0];
+      if (!user) return res.status(401).json({ message: "Unauthorized" });
+      if (user.bind_ip && user.bind_ip !== ip) {
+        return res.status(403).json({ message: "Account locked to another network" });
+      }
+
+      const digest = hashKey(raw);
+      const found = await pool.query(
+        `SELECT id, redeemed_at FROM license_keys WHERE key_hash = $1 LIMIT 1`,
+        [digest]
+      );
+      const key = found.rows[0];
+      if (!key) return res.status(404).json({ message: "Invalid key" });
+      if (key.redeemed_at) return res.status(409).json({ message: "Key already redeemed" });
+
+      const upd = await pool.query(
+        `UPDATE license_keys SET redeemed_at = NOW(), redeemed_by = $1
+         WHERE id = $2 AND redeemed_at IS NULL
+         RETURNING id`,
+        [req.user.id, key.id]
+      );
+      if (!upd.rowCount) return res.status(409).json({ message: "Key already redeemed" });
+      return res.json({ ok: true, message: "Key redeemed" });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ message: "Server error" });

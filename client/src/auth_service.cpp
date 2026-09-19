@@ -176,10 +176,10 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
                 if (out.user.email.empty())
                     out.user.email = jsonText(u, "email");
             }
-            out.ok = !out.token.empty();
-            if (out.ok)
+            out.ok = !out.token.empty() || (j.contains("ok") && j["ok"].is_boolean() && j["ok"].get<bool>());
+            if (out.ok && !out.token.empty())
                 out.message.clear();
-            else if (out.message.empty())
+            else if (!out.ok && out.message.empty())
                 out.message = "Login failed";
             return out;
         }
@@ -222,6 +222,17 @@ AuthResult AuthService::login(const std::string& name, const std::string& passwo
     } catch (...) {
         AuthResult out;
         out.message = "Wrong name or password";
+        return out;
+    }
+}
+
+AuthResult AuthService::redeem(const std::string& token, const std::string& key) {
+    try {
+        json body = { {"key", key} };
+        return parseAuthResponse(HttpClient::request(L"POST", L"/auth/redeem", body.dump(), token));
+    } catch (...) {
+        AuthResult out;
+        out.message = "Redeem failed";
         return out;
     }
 }

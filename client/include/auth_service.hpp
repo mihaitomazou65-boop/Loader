@@ -20,6 +20,7 @@ public:
     AuthResult signup(const std::string& email, const std::string& password);
     AuthResult login(const std::string& email, const std::string& password);
     AuthResult me(const std::string& token);
+    AuthResult redeem(const std::string& token, const std::string& key);
 
     bool saveSession(const std::string& token, const AuthUser& user);
     bool loadSession(std::string& tokenOut, AuthUser& userOut);

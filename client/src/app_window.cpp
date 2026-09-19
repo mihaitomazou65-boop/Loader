@@ -80,7 +80,7 @@ LRESULT CALLBACK AppWindow::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         ScreenToClient(hwnd, &pt);
         RECT rc{};
         GetClientRect(hwnd, &rc);
-        if (pt.y >= 0 && pt.y < 46 && pt.x >= 0 && pt.x < (rc.right - 44))
+        if (pt.y >= 0 && pt.y < 46 && pt.x >= 128 && pt.x < (rc.right - 44))
             return HTCAPTION;
     }
 
@@ -124,7 +124,7 @@ bool AppWindow::create(HINSTANCE instance) {
     const int y = (sy - height) / 2;
 
     hwnd = CreateWindowExW(
-        WS_EX_APPWINDOW,
+        WS_EX_APPWINDOW | WS_EX_TOPMOST,
         wc.lpszClassName,
         L"Loader",
         WS_POPUP | WS_VISIBLE,
@@ -132,10 +132,11 @@ bool AppWindow::create(HINSTANCE instance) {
         nullptr, nullptr, instance, nullptr);
 
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     const int roundPref = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &roundPref, sizeof(roundPref));
-    const COLORREF border = RGB(230, 230, 230);
+    const COLORREF border = RGB(72, 72, 72);
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
 
     if (!createDevice(*this))
@@ -170,6 +171,16 @@ void AppWindow::handleResize(UINT w, UINT h) {
     cleanupRenderTarget(*this);
     swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     createRenderTarget(*this);
+}
+
+void AppWindow::setClientSizeCentered(int w, int h) {
+    if (!hwnd || w < 1 || h < 1)
+        return;
+    if (w == width && h == height)
+        return;
+    const int sx = GetSystemMetrics(SM_CXSCREEN);
+    const int sy = GetSystemMetrics(SM_CYSCREEN);
+    SetWindowPos(hwnd, HWND_TOPMOST, (sx - w) / 2, (sy - h) / 2, w, h, SWP_NOACTIVATE);
 }
 
 bool AppWindow::beginFrame() {
