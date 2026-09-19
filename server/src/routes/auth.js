@@ -184,7 +184,7 @@ export function registerAuthRoutes(app) {
   app.post("/auth/redeem", authMiddleware, async (req, res) => {
     const client = await pool.connect();
     try {
-      const raw = String(req.body?.key || "").trim().toUpperCase().replace(/\s+/g, "");
+      const raw = String(req.body?.key || "").trim().toUpperCase().replace(/[\s\u00A0\u2010-\u2015\u2212]/g, "").replace(/[^A-Z0-9-]/g, "");
       if (raw.length < 10 || raw.length > 80) {
         return res.status(400).json({ message: "Invalid key" });
       }

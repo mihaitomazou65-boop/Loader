@@ -8,7 +8,10 @@ function pepper() {
 }
 
 function hashKey(raw) {
-  const key = String(raw).trim().toUpperCase().replace(/\s+/g, "");
+  const key = String(raw || "")
+    .toUpperCase()
+    .replace(/[\s\u00A0\u2010-\u2015\u2212]/g, "")
+    .replace(/[^A-Z0-9-]/g, "");
   return createHash("sha256").update(`${pepper()}:${key}`).digest("hex");
 }
 
@@ -21,14 +24,6 @@ function makeKey(product) {
   const groups = [body.slice(0, 4), body.slice(4, 8), body.slice(8, 12), body.slice(12, 16)];
   const tag = String(product || "FIVEM").replace(/[^A-Z0-9]/gi, "").slice(0, 6).toUpperCase() || "FIVEM";
   return `${tag}-${groups.join("-")}`;
-}
-
-function keyPrefix(key) {
-  return String(key)
-    .split("-")
-    .filter(Boolean)
-    .slice(0, 3)
-    .join("-");
 }
 
 function deny(req, res) {
@@ -135,7 +130,6 @@ const PAGE = `<!doctype html>
         <button class="act" id="gen">Generate</button>
         <button class="ghost" id="reload">Refresh</button>
       </div>
-      <div id="fresh"></div>
     </div>
     <div class="card">
       <table>
@@ -186,11 +180,13 @@ async function load(){
     "<button class='ghost tiny' data-act='ban-user' data-id='"+esc(u.id)+"' data-banned='"+(u.banned?"0":"1")+"'>"+(u.banned?"Unban":"Ban")+"</button>"+
     "<button class='danger tiny' data-act='del-user' data-id='"+esc(u.id)+"'>Delete</button></td></tr>"
   ).join("")||"<tr><td colspan=8>No users</td></tr>";
-  document.getElementById("keys").innerHTML=(data.keys||[]).map(k=>
-    "<tr><td><code>"+esc(k.prefix)+"</code></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td>"+keyStatus(k)+"</td><td>"+(k.lifetime?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td><td class='acts'>"+
+  document.getElementById("keys").innerHTML=(data.keys||[]).map(k=>{
+    const full=k.key||k.prefix||"";
+    return "<tr><td><code>"+esc(full)+"</code></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td>"+keyStatus(k)+"</td><td>"+(k.lifetime?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td><td class='acts'>"+
+    "<button class='ghost tiny' data-act='copy-key' data-key='"+esc(full)+"'>Copy</button>"+
     (k.cancelled?"":"<button class='ghost tiny' data-act='cancel-key' data-id='"+esc(k.id)+"'>Cancel</button>")+
-    "<button class='danger tiny' data-act='del-key' data-id='"+esc(k.id)+"'>Delete</button></td></tr>"
-  ).join("")||"<tr><td colspan=8>No keys</td></tr>";
+    "<button class='danger tiny' data-act='del-key' data-id='"+esc(k.id)+"'>Delete</button></td></tr>";
+  }).join("")||"<tr><td colspan=8>No keys</td></tr>";
 }
 document.getElementById("reload").onclick=()=>load().catch(()=>{});
 document.getElementById("gen").onclick=async()=>{
@@ -201,15 +197,19 @@ document.getElementById("gen").onclick=async()=>{
     note:document.getElementById("note").value
   };
   const data=await api("/admin/api/keys",{method:"POST",body:JSON.stringify(body)});
-  document.getElementById("fresh").innerHTML=(data.keys||[]).map(k=>"<div class='keyline'>"+esc(k)+"</div>").join("");
   await load();
+  const made=data.keys||[];
+  if(made[0]) navigator.clipboard.writeText(made.length===1?made[0]:made.join("\\n")).catch(()=>{});
 };
 document.addEventListener("click", async (e)=>{
   const b=e.target.closest("[data-act]");
   if(!b) return;
   const act=b.dataset.act, id=b.dataset.id;
   try{
-    if(act==="cancel-key"){
+    if(act==="copy-key"){
+      await navigator.clipboard.writeText(b.dataset.key||"");
+      return;
+    } else if(act==="cancel-key"){
       if(!confirm("Cancel this key? It can never be redeemed, and the user's product is removed if it was already used.")) return;
       await api("/admin/api/keys/"+id+"/cancel",{method:"POST",body:"{}"});
     } else if(act==="del-key"){
@@ -278,6 +278,7 @@ export function registerAdminRoutes(app) {
         return {
           id: r.id,
           prefix: String(r.prefix || "").replace(/-+$/g, ""),
+          key: String(r.prefix || "").replace(/-+$/g, ""),
           product: r.product || "FiveM",
           duration: d.label,
           redeemed: Boolean(r.redeemed_at),
@@ -301,11 +302,10 @@ export function registerAdminRoutes(app) {
     const made = [];
     for (let i = 0; i < count; i++) {
       const key = makeKey(product);
-      const prefix = keyPrefix(key);
       await pool.query(
         `INSERT INTO license_keys (key_hash, prefix, created_ip, product, duration_code, duration_seconds, note)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [hashKey(key), prefix, clientIp(req), product, dur.code, dur.seconds, note || null]
+        [hashKey(key), key, clientIp(req), product, dur.code, dur.seconds, note || null]
       );
       made.push(key);
     }
