@@ -5,6 +5,16 @@
 #include <filesystem>
 #include <fstream>
 #include <shlobj.h>
+#include <windows.h>
+#include <iphlpapi.h>
+#include <bcrypt.h>
+#include <lmcons.h>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -42,6 +52,108 @@ json parseBody(const std::string& body) {
     return j;
 }
 
+std::string toHex(const unsigned char* data, size_t len) {
+    static const char* k = "0123456789abcdef";
+    std::string out;
+    out.resize(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        out[i * 2] = k[data[i] >> 4];
+        out[i * 2 + 1] = k[data[i] & 0xf];
+    }
+    return out;
+}
+
+std::string sha256Hex(const std::string& input) {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    DWORD objLen = 0, dataLen = 0, hashLen = 0;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0)
+        return {};
+    BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(objLen), &dataLen, 0);
+    BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, (PUCHAR)&hashLen, sizeof(hashLen), &dataLen, 0);
+    std::vector<UCHAR> obj(objLen), digest(hashLen);
+    if (BCryptCreateHash(alg, &hash, obj.data(), objLen, nullptr, 0, 0) != 0) {
+        BCryptCloseAlgorithmProvider(alg, 0);
+        return {};
+    }
+    BCryptHashData(hash, (PUCHAR)input.data(), (ULONG)input.size(), 0);
+    BCryptFinishHash(hash, digest.data(), hashLen, 0);
+    BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return toHex(digest.data(), digest.size());
+}
+
+std::string wideToUtf8Local(const std::wstring& s) {
+    if (s.empty()) return {};
+    const int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, out.data(), len, nullptr, nullptr);
+    if (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
+
+std::string collectTraces() {
+    std::string blob;
+
+    wchar_t guid[256]{};
+    DWORD guidSize = sizeof(guid);
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS) {
+        RegQueryValueExW(key, L"MachineGuid", nullptr, nullptr, (LPBYTE)guid, &guidSize);
+        RegCloseKey(key);
+    }
+    blob += "mg=";
+    blob += wideToUtf8Local(guid);
+    blob += ";";
+
+    wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1]{};
+    DWORD computerLen = MAX_COMPUTERNAME_LENGTH + 1;
+    GetComputerNameW(computer, &computerLen);
+    blob += "cn=";
+    blob += wideToUtf8Local(computer);
+    blob += ";";
+
+    wchar_t user[UNLEN + 1]{};
+    DWORD userLen = UNLEN + 1;
+    GetUserNameW(user, &userLen);
+    blob += "un=";
+    blob += wideToUtf8Local(user);
+    blob += ";";
+
+    DWORD serial = 0;
+    GetVolumeInformationW(L"C:\\", nullptr, 0, &serial, nullptr, nullptr, nullptr, 0);
+    blob += "vs=";
+    blob += std::to_string(serial);
+    blob += ";";
+
+    ULONG bufLen = 0;
+    GetAdaptersInfo(nullptr, &bufLen);
+    if (bufLen) {
+        std::vector<unsigned char> buf(bufLen);
+        if (GetAdaptersInfo(reinterpret_cast<PIP_ADAPTER_INFO>(buf.data()), &bufLen) == NO_ERROR) {
+            auto* adp = reinterpret_cast<PIP_ADAPTER_INFO>(buf.data());
+            int n = 0;
+            while (adp && n < 8) {
+                blob += "mac=";
+                for (UINT i = 0; i < adp->AddressLength; ++i) {
+                    char hex[8];
+                    sprintf_s(hex, "%02x", adp->Address[i]);
+                    blob += hex;
+                }
+                blob += ";";
+                adp = adp->Next;
+                ++n;
+            }
+        }
+    }
+    return blob;
+}
+
+std::string deviceHwid() {
+    const std::string hex = sha256Hex(collectTraces());
+    return hex.empty() ? std::string(64, '0') : hex;
+}
+
 } // namespace
 
 AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
@@ -75,6 +187,8 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
         if (out.message.empty()) {
             if (resp.status == 409)
                 out.message = "Name already taken";
+            else if (resp.status == 403)
+                out.message = out.message.empty() ? "Account locked to this device" : out.message;
             else if (resp.status == 401)
                 out.message = "Wrong name or password";
             else if (resp.status == 0)
@@ -92,7 +206,7 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
 
 AuthResult AuthService::signup(const std::string& name, const std::string& password) {
     try {
-        json body = { {"name", name}, {"email", name}, {"password", password} };
+        json body = { {"name", name}, {"email", name}, {"password", password}, {"hwid", deviceHwid()} };
         return parseAuthResponse(HttpClient::request(L"POST", L"/auth/signup", body.dump()));
     } catch (...) {
         AuthResult out;
@@ -103,7 +217,7 @@ AuthResult AuthService::signup(const std::string& name, const std::string& passw
 
 AuthResult AuthService::login(const std::string& name, const std::string& password) {
     try {
-        json body = { {"name", name}, {"email", name}, {"password", password} };
+        json body = { {"name", name}, {"email", name}, {"password", password}, {"hwid", deviceHwid()} };
         return parseAuthResponse(HttpClient::request(L"POST", L"/auth/login", body.dump()));
     } catch (...) {
         AuthResult out;

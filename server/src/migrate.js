@@ -27,10 +27,11 @@ export async function migrate() {
 
   try {
     await pool.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS users_name_lower_idx
-      ON users (LOWER(email));
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS bind_hwid TEXT,
+        ADD COLUMN IF NOT EXISTS bind_ip TEXT
     `);
   } catch (err) {
-    console.error("name index", err.message);
+    console.error("bind columns", err.message);
   }
 }

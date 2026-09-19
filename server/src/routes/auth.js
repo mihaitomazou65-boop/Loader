@@ -15,6 +15,24 @@ function validatePassword(password) {
   return typeof password === "string" && password.length >= 8;
 }
 
+function readHwid(body) {
+  const h = String(body?.hwid || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(h)) return "";
+  return h;
+}
+
+function clientIp(req) {
+  const raw = String(req.ip || "").split(",")[0].trim();
+  return raw.replace(/^::ffff:/i, "");
+}
+
+function bindConflict(row, hwid, ip) {
+  if (!row.bind_hwid || !row.bind_ip) return null;
+  if (row.bind_hwid !== hwid) return "Account locked to another device";
+  if (row.bind_ip !== ip) return "Account locked to another network";
+  return null;
+}
+
 export function registerAuthRoutes(app) {
   app.use("/auth", (req, res, next) => {
     if (!process.env.DATABASE_URL) {
@@ -27,12 +45,17 @@ export function registerAuthRoutes(app) {
     try {
       const name = readName(req.body);
       const password = req.body?.password;
+      const hwid = readHwid(req.body);
+      const ip = clientIp(req);
 
       if (!validateName(name)) {
         return res.status(400).json({ message: "Name must be 3-24 characters" });
       }
       if (!validatePassword(password)) {
         return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+      if (!hwid || !ip) {
+        return res.status(400).json({ message: "Device bind required" });
       }
 
       const existing = await pool.query(
@@ -45,9 +68,10 @@ export function registerAuthRoutes(app) {
 
       const password_hash = await bcrypt.hash(password, 12);
       const result = await pool.query(
-        `INSERT INTO users (email, password_hash) VALUES ($1, $2)
+        `INSERT INTO users (email, password_hash, bind_hwid, bind_ip)
+         VALUES ($1, $2, $3, $4)
          RETURNING id, email, created_at`,
-        [name, password_hash]
+        [name, password_hash, hwid, ip]
       );
 
       const user = result.rows[0];
@@ -66,13 +90,19 @@ export function registerAuthRoutes(app) {
     try {
       const name = readName(req.body);
       const password = req.body?.password;
+      const hwid = readHwid(req.body);
+      const ip = clientIp(req);
 
       if (!validateName(name) || typeof password !== "string") {
         return res.status(401).json({ message: "Wrong name or password" });
       }
+      if (!hwid || !ip) {
+        return res.status(400).json({ message: "Device bind required" });
+      }
 
       const result = await pool.query(
-        `SELECT id, email, password_hash FROM users WHERE LOWER(email) = $1`,
+        `SELECT id, email, password_hash, bind_hwid, bind_ip
+         FROM users WHERE LOWER(email) = $1`,
         [name]
       );
       const row = result.rows[0];
@@ -83,6 +113,18 @@ export function registerAuthRoutes(app) {
       const ok = await bcrypt.compare(password, row.password_hash);
       if (!ok) {
         return res.status(401).json({ message: "Wrong name or password" });
+      }
+
+      if (!row.bind_hwid || !row.bind_ip) {
+        await pool.query(
+          `UPDATE users SET bind_hwid = $1, bind_ip = $2 WHERE id = $3 AND bind_hwid IS NULL`,
+          [hwid, ip, row.id]
+        );
+      } else {
+        const locked = bindConflict(row, hwid, ip);
+        if (locked) {
+          return res.status(403).json({ message: locked });
+        }
       }
 
       const token = signToken({ id: row.id, email: row.email });
@@ -96,12 +138,16 @@ export function registerAuthRoutes(app) {
   app.get("/auth/me", authMiddleware, async (req, res) => {
     try {
       const result = await pool.query(
-        `SELECT id, email, created_at FROM users WHERE id = $1`,
+        `SELECT id, email, created_at, bind_ip FROM users WHERE id = $1`,
         [req.user.id]
       );
       const user = result.rows[0];
       if (!user) {
         return res.status(401).json({ message: "Unauthorized" });
+      }
+      const ip = clientIp(req);
+      if (user.bind_ip && user.bind_ip !== ip) {
+        return res.status(403).json({ message: "Account locked to another network" });
       }
       return res.json({ user: { id: user.id, name: user.email } });
     } catch (err) {
