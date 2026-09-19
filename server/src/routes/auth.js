@@ -114,13 +114,17 @@ export function registerAuthRoutes(app) {
       }
 
       const result = await pool.query(
-        `SELECT id, email, password_hash, bind_hwid, bind_ip, sub_product, sub_expires_at, sub_lifetime
+        `SELECT id, email, password_hash, bind_hwid, bind_ip, banned,
+                sub_product, sub_expires_at, sub_lifetime
          FROM users WHERE LOWER(email) = $1`,
         [name]
       );
       const row = result.rows[0];
       if (!row) {
         return res.status(401).json({ message: "Wrong name or password" });
+      }
+      if (row.banned) {
+        return res.status(403).json({ message: "Account banned" });
       }
 
       const ok = await bcrypt.compare(password, row.password_hash);
@@ -156,12 +160,15 @@ export function registerAuthRoutes(app) {
   app.get("/auth/me", authMiddleware, async (req, res) => {
     try {
       const result = await pool.query(
-        `SELECT id, email, created_at, bind_ip, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
+        `SELECT id, email, created_at, bind_ip, banned, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
         [req.user.id]
       );
       const user = result.rows[0];
       if (!user) {
         return res.status(401).json({ message: "Unauthorized" });
+      }
+      if (user.banned) {
+        return res.status(403).json({ message: "Account banned" });
       }
       const ip = clientIp(req);
       if (user.bind_ip && !isPrivateIp(user.bind_ip) && user.bind_ip !== ip) {
@@ -183,11 +190,12 @@ export function registerAuthRoutes(app) {
       }
       const ip = clientIp(req);
       const userRow = await client.query(
-        `SELECT id, bind_ip FROM users WHERE id = $1`,
+        `SELECT id, bind_ip, banned FROM users WHERE id = $1`,
         [req.user.id]
       );
       const user = userRow.rows[0];
       if (!user) return res.status(401).json({ message: "Unauthorized" });
+      if (user.banned) return res.status(403).json({ message: "Account banned" });
       if (user.bind_ip && !isPrivateIp(user.bind_ip) && user.bind_ip !== ip) {
         return res.status(403).json({ message: "Account locked to another network" });
       }
@@ -195,7 +203,7 @@ export function registerAuthRoutes(app) {
       const digest = hashKey(raw);
       await client.query("BEGIN");
       const found = await client.query(
-        `SELECT id, redeemed_at, product, duration_code, duration_seconds
+        `SELECT id, redeemed_at, cancelled_at, product, duration_code, duration_seconds
          FROM license_keys WHERE key_hash = $1 LIMIT 1 FOR UPDATE`,
         [digest]
       );
@@ -203,6 +211,10 @@ export function registerAuthRoutes(app) {
       if (!key) {
         await client.query("ROLLBACK");
         return res.status(404).json({ message: "Invalid key" });
+      }
+      if (key.cancelled_at) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ message: "This key has been cancelled" });
       }
       if (key.redeemed_at) {
         await client.query("ROLLBACK");
@@ -215,7 +227,7 @@ export function registerAuthRoutes(app) {
 
       const upd = await client.query(
         `UPDATE license_keys SET redeemed_at = NOW(), redeemed_by = $1, expires_at = $3
-         WHERE id = $2 AND redeemed_at IS NULL
+         WHERE id = $2 AND redeemed_at IS NULL AND cancelled_at IS NULL
          RETURNING id`,
         [req.user.id, key.id, expiresSql]
       );

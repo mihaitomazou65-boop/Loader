@@ -43,7 +43,8 @@ export async function migrate() {
         ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS sub_product TEXT,
         ADD COLUMN IF NOT EXISTS sub_expires_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS sub_lifetime BOOLEAN NOT NULL DEFAULT FALSE
+        ADD COLUMN IF NOT EXISTS sub_lifetime BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS banned BOOLEAN NOT NULL DEFAULT FALSE
     `);
   } catch (err) {
     console.error("bind columns", err.message);
@@ -72,7 +73,8 @@ export async function migrate() {
         ADD COLUMN IF NOT EXISTS duration_code TEXT NOT NULL DEFAULT '30d',
         ADD COLUMN IF NOT EXISTS duration_seconds INTEGER,
         ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS note TEXT
+        ADD COLUMN IF NOT EXISTS note TEXT,
+        ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ
     `);
   } catch (err) {
     console.error("license_keys cols", err.message);

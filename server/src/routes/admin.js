@@ -41,6 +41,19 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function uuid(v) {
+  const id = String(v || "");
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : "";
+}
+
+async function clearSub(userId) {
+  if (!userId) return;
+  await pool.query(
+    `UPDATE users SET sub_product = NULL, sub_expires_at = NULL, sub_lifetime = FALSE WHERE id = $1`,
+    [userId]
+  );
+}
+
 const PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -70,6 +83,10 @@ const PAGE = `<!doctype html>
   input, select { background:#0b0e14; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; min-width:110px; }
   button.act { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 14px; cursor:pointer; font-weight:600; }
   button.ghost { background:#151a26; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 14px; cursor:pointer; }
+  button.tiny { padding:5px 8px; font-size:11px; margin-right:4px; }
+  button.danger { background:#3a1518; color:#ffb4b4; border:1px solid #5a2428; border-radius:8px; cursor:pointer; }
+  .bad { color:#ff6b6b; }
+  .acts { white-space:nowrap; }
   table { width:100%; border-collapse:collapse; margin-top:8px; }
   th, td { text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); font-size:12px; }
   th { color:var(--muted); font-weight:500; }
@@ -122,7 +139,7 @@ const PAGE = `<!doctype html>
     </div>
     <div class="card">
       <table>
-        <thead><tr><th>Key</th><th>Product</th><th>Duration</th><th>Status</th><th>Expires</th><th>Used by</th><th>Created</th></tr></thead>
+        <thead><tr><th>Key</th><th>Product</th><th>Duration</th><th>Status</th><th>Expires</th><th>Used by</th><th>Created</th><th></th></tr></thead>
         <tbody id="keys"></tbody>
       </table>
     </div>
@@ -130,7 +147,7 @@ const PAGE = `<!doctype html>
   <section id="users" class="hide">
     <div class="card">
       <table>
-        <thead><tr><th>User</th><th>Last IP</th><th>Bound IP</th><th>HWID</th><th>Sub</th><th>Expires</th><th>Last seen</th></tr></thead>
+        <thead><tr><th>User</th><th>Last IP</th><th>Bound IP</th><th>HWID</th><th>Sub</th><th>Expires</th><th>Last seen</th><th></th></tr></thead>
         <tbody id="usersBody"></tbody>
       </table>
     </div>
@@ -153,6 +170,11 @@ document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>{
   b.classList.add("on");
   ["dash","licenses","users"].forEach(id=>document.getElementById(id).classList.toggle("hide", b.dataset.tab!==id));
 });
+function keyStatus(k){
+  if(k.cancelled) return "<span class='bad'>cancelled</span>";
+  if(k.redeemed) return "<span class='ok'>used</span>";
+  return "<span class='warn'>unused</span>";
+}
 async function load(){
   const data=await api("/admin/api/state");
   document.getElementById("sUsers").textContent=data.stats.users;
@@ -160,11 +182,15 @@ async function load(){
   document.getElementById("sUsed").textContent=data.stats.redeemed;
   document.getElementById("sLife").textContent=data.stats.lifetime;
   document.getElementById("usersBody").innerHTML=(data.users||[]).map(u=>
-    "<tr><td>"+esc(u.name)+"</td><td><code>"+esc(u.last_ip)+"</code></td><td><code>"+esc(u.ip)+"</code></td><td><code>"+esc(u.hwid)+"</code></td><td>"+esc(u.sub)+"</td><td>"+(u.lifetime?"Lifetime":fmt(u.expires))+"</td><td>"+fmt(u.last_seen)+"</td></tr>"
-  ).join("")||"<tr><td colspan=7>No users</td></tr>";
+    "<tr><td>"+esc(u.name)+(u.banned?" <span class='bad'>banned</span>":"")+"</td><td><code>"+esc(u.last_ip)+"</code></td><td><code>"+esc(u.ip)+"</code></td><td><code>"+esc(u.hwid)+"</code></td><td>"+esc(u.sub)+"</td><td>"+(u.lifetime?"Lifetime":fmt(u.expires))+"</td><td>"+fmt(u.last_seen)+"</td><td class='acts'>"+
+    "<button class='ghost tiny' data-act='ban-user' data-id='"+esc(u.id)+"' data-banned='"+(u.banned?"0":"1")+"'>"+(u.banned?"Unban":"Ban")+"</button>"+
+    "<button class='danger tiny' data-act='del-user' data-id='"+esc(u.id)+"'>Delete</button></td></tr>"
+  ).join("")||"<tr><td colspan=8>No users</td></tr>";
   document.getElementById("keys").innerHTML=(data.keys||[]).map(k=>
-    "<tr><td><code>"+esc(k.prefix)+"</code></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td class='"+(k.redeemed?"ok":"warn")+"'>"+(k.redeemed?"used":"unused")+"</td><td>"+(k.lifetime?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td></tr>"
-  ).join("")||"<tr><td colspan=7>No keys</td></tr>";
+    "<tr><td><code>"+esc(k.prefix)+"</code></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td>"+keyStatus(k)+"</td><td>"+(k.lifetime?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td><td class='acts'>"+
+    (k.cancelled?"":"<button class='ghost tiny' data-act='cancel-key' data-id='"+esc(k.id)+"'>Cancel</button>")+
+    "<button class='danger tiny' data-act='del-key' data-id='"+esc(k.id)+"'>Delete</button></td></tr>"
+  ).join("")||"<tr><td colspan=8>No keys</td></tr>";
 }
 document.getElementById("reload").onclick=()=>load().catch(()=>{});
 document.getElementById("gen").onclick=async()=>{
@@ -178,6 +204,28 @@ document.getElementById("gen").onclick=async()=>{
   document.getElementById("fresh").innerHTML=(data.keys||[]).map(k=>"<div class='keyline'>"+esc(k)+"</div>").join("");
   await load();
 };
+document.addEventListener("click", async (e)=>{
+  const b=e.target.closest("[data-act]");
+  if(!b) return;
+  const act=b.dataset.act, id=b.dataset.id;
+  try{
+    if(act==="cancel-key"){
+      if(!confirm("Cancel this key? It can never be redeemed, and the user's product is removed if it was already used.")) return;
+      await api("/admin/api/keys/"+id+"/cancel",{method:"POST",body:"{}"});
+    } else if(act==="del-key"){
+      if(!confirm("Delete this key forever?")) return;
+      await api("/admin/api/keys/"+id,{method:"DELETE"});
+    } else if(act==="ban-user"){
+      const banned=b.dataset.banned==="1";
+      if(!confirm(banned?"Ban this user? They will not be able to log in.":"Unban this user?")) return;
+      await api("/admin/api/users/"+id+"/ban",{method:"POST",body:JSON.stringify({banned})});
+    } else if(act==="del-user"){
+      if(!confirm("Delete this account forever?")) return;
+      await api("/admin/api/users/"+id,{method:"DELETE"});
+    } else return;
+    await load();
+  }catch(err){ alert("Action failed"); }
+});
 load().catch(()=>{ document.querySelector("main").innerHTML="<p>Failed to load</p>"; });
 </script>
 </body>
@@ -197,22 +245,24 @@ export function registerAdminRoutes(app) {
 
   app.get("/admin/api/state", requireAdmin, async (_req, res) => {
     const users = await pool.query(
-      `SELECT email, bind_ip, last_seen_ip, bind_hwid, created_at, last_seen_at,
-              sub_product, sub_expires_at, sub_lifetime
+      `SELECT id, email, bind_ip, last_seen_ip, bind_hwid, created_at, last_seen_at,
+              sub_product, sub_expires_at, sub_lifetime, banned
        FROM users ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 300`
     );
     const keys = await pool.query(
-      `SELECT k.prefix, k.product, k.duration_code, k.redeemed_at, k.created_at, k.expires_at, u.email AS redeemed_by
+      `SELECT k.id, k.prefix, k.product, k.duration_code, k.redeemed_at, k.cancelled_at,
+              k.created_at, k.expires_at, u.email AS redeemed_by
        FROM license_keys k
        LEFT JOIN users u ON u.id = k.redeemed_by
        ORDER BY k.created_at DESC LIMIT 300`
     );
-    const unused = keys.rows.filter((r) => !r.redeemed_at).length;
-    const redeemed = keys.rows.filter((r) => r.redeemed_at).length;
-    const lifetime = users.rows.filter((r) => r.sub_lifetime).length;
+    const unused = keys.rows.filter((r) => !r.redeemed_at && !r.cancelled_at).length;
+    const redeemed = keys.rows.filter((r) => r.redeemed_at && !r.cancelled_at).length;
+    const lifetime = users.rows.filter((r) => r.sub_lifetime && !r.banned).length;
     res.json({
       stats: { users: users.rowCount, unused, redeemed, lifetime },
       users: users.rows.map((r) => ({
+        id: r.id,
         name: r.email,
         ip: r.bind_ip || "",
         last_ip: r.last_seen_ip || r.bind_ip || "",
@@ -221,14 +271,17 @@ export function registerAdminRoutes(app) {
         expires: r.sub_expires_at,
         lifetime: Boolean(r.sub_lifetime),
         last_seen: r.last_seen_at,
+        banned: Boolean(r.banned),
       })),
       keys: keys.rows.map((r) => {
         const d = durationByCode(r.duration_code);
         return {
+          id: r.id,
           prefix: String(r.prefix || "").replace(/-+$/g, ""),
           product: r.product || "FiveM",
           duration: d.label,
           redeemed: Boolean(r.redeemed_at),
+          cancelled: Boolean(r.cancelled_at),
           redeemed_by: r.redeemed_by || "",
           created: r.created_at,
           expires: r.expires_at,
@@ -257,6 +310,74 @@ export function registerAdminRoutes(app) {
       made.push(key);
     }
     res.json({ keys: made });
+  });
+
+  app.post("/admin/api/keys/:id/cancel", requireAdmin, async (req, res) => {
+    const id = uuid(req.params.id);
+    if (!id) return res.status(400).json({ message: "Invalid id" });
+    try {
+      const found = await pool.query(
+        `SELECT id, redeemed_by, cancelled_at FROM license_keys WHERE id = $1`,
+        [id]
+      );
+      const key = found.rows[0];
+      if (!key) return res.status(404).json({ message: "Key not found" });
+      if (!key.cancelled_at) {
+        await pool.query(`UPDATE license_keys SET cancelled_at = NOW() WHERE id = $1`, [id]);
+        await clearSub(key.redeemed_by);
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  app.delete("/admin/api/keys/:id", requireAdmin, async (req, res) => {
+    const id = uuid(req.params.id);
+    if (!id) return res.status(400).json({ message: "Invalid id" });
+    try {
+      const found = await pool.query(
+        `SELECT id, redeemed_by FROM license_keys WHERE id = $1`,
+        [id]
+      );
+      const key = found.rows[0];
+      if (!key) return res.status(404).json({ message: "Key not found" });
+      await clearSub(key.redeemed_by);
+      await pool.query(`DELETE FROM license_keys WHERE id = $1`, [id]);
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  app.post("/admin/api/users/:id/ban", requireAdmin, async (req, res) => {
+    const id = uuid(req.params.id);
+    if (!id) return res.status(400).json({ message: "Invalid id" });
+    const banned = req.body?.banned !== false && req.body?.banned !== "0";
+    try {
+      const upd = await pool.query(`UPDATE users SET banned = $1 WHERE id = $2 RETURNING id`, [banned, id]);
+      if (!upd.rowCount) return res.status(404).json({ message: "User not found" });
+      return res.json({ ok: true, banned });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  app.delete("/admin/api/users/:id", requireAdmin, async (req, res) => {
+    const id = uuid(req.params.id);
+    if (!id) return res.status(400).json({ message: "Invalid id" });
+    try {
+      await pool.query(`UPDATE license_keys SET redeemed_by = NULL WHERE redeemed_by = $1`, [id]);
+      const del = await pool.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [id]);
+      if (!del.rowCount) return res.status(404).json({ message: "User not found" });
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
   });
 }
 
