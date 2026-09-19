@@ -1,0 +1,6 @@
+node_modules/
+.env
+client/build/
+.vs/
+x64/
+*.user
