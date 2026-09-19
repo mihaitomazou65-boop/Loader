@@ -43,7 +43,25 @@ function publicUser(row) {
     product: active ? (row.sub_product || "") : "",
     lifetime,
     expires: row.sub_expires_at || null,
+    file_name: "",
+    file_version: "",
   };
+}
+
+async function withProductFile(row) {
+  const u = publicUser(row);
+  if (!u.product) return u;
+  try {
+    const f = await pool.query(
+      `SELECT filename, version FROM product_files WHERE product = $1`,
+      [u.product]
+    );
+    if (f.rows[0]) {
+      u.file_name = f.rows[0].filename || "";
+      u.file_version = String(f.rows[0].version || "");
+    }
+  } catch (_) {}
+  return u;
 }
 
 export function registerAuthRoutes(app) {
@@ -89,7 +107,7 @@ export function registerAuthRoutes(app) {
 
       const user = result.rows[0];
       const token = signToken({ id: user.id, email: user.email });
-      return res.status(201).json({ token, user: publicUser({ ...user, sub_product: null, sub_expires_at: null, sub_lifetime: false }) });
+      return res.status(201).json({ token, user: await withProductFile({ ...user, sub_product: null, sub_expires_at: null, sub_lifetime: false }) });
     } catch (err) {
       if (err.code === "23505") {
         return res.status(409).json({ message: "Name already taken" });
@@ -150,7 +168,7 @@ export function registerAuthRoutes(app) {
       }
 
       const token = signToken({ id: row.id, email: row.email });
-      return res.json({ token, user: publicUser(row) });
+      return res.json({ token, user: await withProductFile(row) });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ message: "Server error" });
@@ -174,7 +192,7 @@ export function registerAuthRoutes(app) {
       if (user.bind_ip && !isPrivateIp(user.bind_ip) && user.bind_ip !== ip) {
         return res.status(403).json({ message: "Account locked to another network" });
       }
-      return res.json({ user: publicUser(user) });
+      return res.json({ user: await withProductFile(user) });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ message: "Server error" });
@@ -248,7 +266,7 @@ export function registerAuthRoutes(app) {
       return res.json({
         ok: true,
         message: lifetime ? "FiveM lifetime redeemed" : "FiveM key redeemed",
-        user: publicUser(fresh.rows[0]),
+        user: await withProductFile(fresh.rows[0]),
       });
     } catch (err) {
       try { if (client) await client.query("ROLLBACK"); } catch (_) {}
@@ -256,6 +274,35 @@ export function registerAuthRoutes(app) {
       return res.status(500).json({ message: "Server error" });
     } finally {
       if (client) client.release();
+    }
+  });
+
+  app.get("/auth/product-file", authMiddleware, async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT id, banned, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
+        [req.user.id]
+      );
+      const user = result.rows[0];
+      if (!user) return res.status(401).json({ message: "Unauthorized" });
+      if (user.banned) return res.status(403).json({ message: "Account banned" });
+      const u = publicUser(user);
+      if (!u.product) return res.status(403).json({ message: "No product" });
+      const file = await pool.query(
+        `SELECT filename, version, data FROM product_files WHERE product = $1`,
+        [u.product]
+      );
+      if (!file.rowCount) return res.status(404).json({ message: "No product file" });
+      const row = file.rows[0];
+      const name = String(row.filename || "product.exe").replace(/[^\w.\-]+/g, "_");
+      res.set("Content-Type", "application/octet-stream");
+      res.set("X-Product-File", name);
+      res.set("X-Product-Version", String(row.version || ""));
+      res.set("Content-Disposition", `attachment; filename="${name}"`);
+      return res.send(row.data);
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
     }
   });
 }

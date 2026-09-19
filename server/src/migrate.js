@@ -79,4 +79,18 @@ export async function migrate() {
   } catch (err) {
     console.error("license_keys cols", err.message);
   }
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_files (
+        product TEXT PRIMARY KEY,
+        filename TEXT NOT NULL,
+        version TEXT NOT NULL,
+        data BYTEA NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+  } catch (err) {
+    console.error("product_files", err.message);
+  }
 }

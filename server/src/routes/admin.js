@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "crypto";
+import multer from "multer";
 import { pool } from "../db.js";
 import { DURATIONS, PRODUCTS, durationByCode } from "../util/duration.js";
 import { adminSecretOk, clientIp, isAdminRequest, setAdminCookie } from "../util/ip.js";
@@ -35,6 +36,11 @@ function requireAdmin(req, res, next) {
   if (!isAdminRequest(req)) return deny(req, res);
   next();
 }
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
 
 function uuid(v) {
   const id = String(v || "");
@@ -113,6 +119,15 @@ const PAGE = `<!doctype html>
       <div class="stat"><span>Redeemed</span><b id="sUsed">0</b></div>
       <div class="stat"><span>Lifetime</span><b id="sLife">0</b></div>
     </div>
+    <div class="card">
+      <div class="row">
+        <label>FiveM product file
+          <input id="pfile" type="file"/>
+        </label>
+        <button class="act" id="upfile">Save file</button>
+      </div>
+      <p class="sub" id="pfileinfo">No file yet</p>
+    </div>
   </section>
   <section id="licenses" class="hide">
     <div class="card">
@@ -177,6 +192,8 @@ async function load(){
   document.getElementById("sUnused").textContent=data.stats.unused;
   document.getElementById("sUsed").textContent=data.stats.redeemed;
   document.getElementById("sLife").textContent=data.stats.lifetime;
+  const pf=data.productFile||{};
+  document.getElementById("pfileinfo").textContent=pf.name?("Current file: "+pf.name):"No file yet";
   document.getElementById("usersBody").innerHTML=(data.users||[]).map(u=>
     "<tr><td>"+esc(u.name)+(u.banned?" <span class='bad'>banned</span>":"")+"</td><td><code>"+esc(u.last_ip)+"</code></td><td><code>"+esc(u.ip)+"</code></td><td><code>"+esc(u.hwid)+"</code></td><td>"+esc(u.sub)+"</td><td>"+(u.lifetime?"Lifetime":fmt(u.expires))+"</td><td>"+fmt(u.last_seen)+"</td><td class='acts'>"+
     "<button class='ghost tiny' data-act='ban-user' data-id='"+esc(u.id)+"' data-banned='"+(u.banned?"0":"1")+"'>"+(u.banned?"Unban":"Ban")+"</button>"+
@@ -201,6 +218,16 @@ document.getElementById("gen").onclick=async()=>{
   await load();
   const made=data.keys||[];
   if(made[0]) navigator.clipboard.writeText(made.length===1?made[0]:made.join("\\n")).catch(()=>{});
+};
+document.getElementById("upfile").onclick=async()=>{
+  const f=document.getElementById("pfile").files[0];
+  if(!f){ alert("Pick a file first"); return; }
+  const fd=new FormData();
+  fd.append("file", f);
+  fd.append("product","FiveM");
+  const r=await fetch("/admin/api/product-file",{method:"POST",body:fd});
+  if(!r.ok){ alert("Upload failed"); return; }
+  await load();
 };
 document.addEventListener("click", async (e)=>{
   const b=e.target.closest("[data-act]");
@@ -268,8 +295,10 @@ export function registerAdminRoutes(app) {
     const unused = keys.rows.filter((r) => !r.redeemed_at && !r.cancelled_at).length;
     const redeemed = keys.rows.filter((r) => r.redeemed_at && !r.cancelled_at).length;
     const lifetime = users.rows.filter((r) => r.sub_lifetime && !r.banned).length;
+    const fileRow = await pool.query(`SELECT filename, version, octet_length(data) AS bytes FROM product_files WHERE product = 'FiveM'`);
     res.json({
       stats: { users: users.rowCount, unused, redeemed, lifetime },
+      productFile: fileRow.rows[0] ? { name: fileRow.rows[0].filename, version: fileRow.rows[0].version, size: fileRow.rows[0].bytes } : null,
       users: users.rows.map((r) => ({
         id: r.id,
         name: r.email,
@@ -319,6 +348,27 @@ export function registerAdminRoutes(app) {
       made.push(key);
     }
     res.json({ keys: made });
+  });
+
+  app.post("/admin/api/product-file", requireAdmin, upload.single("file"), async (req, res) => {
+    try {
+      if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+        return res.status(400).json({ message: "No file" });
+      }
+      const product = PRODUCTS.includes(req.body?.product) ? req.body.product : "FiveM";
+      const filename = String(req.file.originalname || "product.exe").replace(/[^\w.\-]+/g, "_").slice(0, 80);
+      const version = String(Date.now());
+      await pool.query(
+        `INSERT INTO product_files (product, filename, version, data, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (product) DO UPDATE SET filename = $2, version = $3, data = $4, updated_at = NOW()`,
+        [product, filename, version, req.file.buffer]
+      );
+      return res.json({ ok: true, name: filename, version });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
   });
 
   app.post("/admin/api/keys/:id/cancel", requireAdmin, async (req, res) => {
