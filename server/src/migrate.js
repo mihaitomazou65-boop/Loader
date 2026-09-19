@@ -1,4 +1,4 @@
-import { pool } from "./db.js";
+﻿import { pool } from "./db.js";
 
 export async function migrate() {
   await pool.query(`
@@ -8,5 +8,9 @@ export async function migrate() {
       password_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS users_name_lower_idx
+    ON users (LOWER(email));
   `);
 }

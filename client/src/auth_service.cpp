@@ -20,79 +20,118 @@ fs::path sessionPath() {
     return dir / L"session.json";
 }
 
+std::string jsonText(const json& j, const char* key) {
+    if (!j.contains(key))
+        return {};
+    const auto& v = j[key];
+    if (v.is_string())
+        return v.get<std::string>();
+    if (v.is_number())
+        return v.dump();
+    return {};
+}
+
+json parseBody(const std::string& body) {
+    if (body.empty())
+        return json::object();
+    if (body[0] == '<' || body.find("Application loading") != std::string::npos)
+        return json::object();
+    json j = json::parse(body, nullptr, false);
+    if (j.is_discarded() || !j.is_object())
+        return json::object();
+    return j;
+}
+
 } // namespace
 
 AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
     AuthResult out;
-    if (resp.error.empty() == false && resp.body.empty()) {
-        out.message = resp.error;
-        return out;
-    }
-
     try {
-        const json j = json::parse(resp.body.empty() ? "{}" : resp.body);
-        if (j.contains("message") && j["message"].is_string())
-            out.message = j["message"].get<std::string>();
-    } catch (...) {
-        if (resp.status == 0)
-            out.message = "Network error";
-        else
-            out.message = "Unexpected server response";
-        return out;
-    }
+        if (!resp.error.empty() && resp.body.empty()) {
+            out.message = resp.error;
+            return out;
+        }
 
-    if (resp.status >= 200 && resp.status < 300) {
-        try {
-            const json j = json::parse(resp.body);
-            out.token = j.value("token", "");
+        const json j = parseBody(resp.body);
+        out.message = jsonText(j, "message");
+
+        if (resp.status >= 200 && resp.status < 300) {
+            out.token = jsonText(j, "token");
             if (j.contains("user") && j["user"].is_object()) {
-                out.user.id = j["user"].value("id", "");
-                out.user.email = j["user"].value("email", "");
+                const json& u = j["user"];
+                out.user.id = jsonText(u, "id");
+                out.user.email = jsonText(u, "name");
+                if (out.user.email.empty())
+                    out.user.email = jsonText(u, "email");
             }
             out.ok = !out.token.empty();
-            if (out.ok && out.message.empty())
-                out.message = "Success";
-        } catch (...) {
-            out.message = "Invalid response JSON";
+            if (out.ok)
+                out.message.clear();
+            else if (out.message.empty())
+                out.message = "Login failed";
+            return out;
+        }
+
+        if (out.message.empty()) {
+            if (resp.status == 409)
+                out.message = "Name already taken";
+            else if (resp.status == 401)
+                out.message = "Wrong name or password";
+            else if (resp.status == 0)
+                out.message = resp.error.empty() ? "Can't reach server" : resp.error;
+            else
+                out.message = "Request failed";
         }
         return out;
+    } catch (...) {
+        out.ok = false;
+        out.message = "Wrong name or password";
+        return out;
     }
-
-    if (out.message.empty())
-        out.message = "Request failed";
-    return out;
 }
 
-AuthResult AuthService::signup(const std::string& email, const std::string& password) {
-    json body = { {"email", email}, {"password", password} };
-    const HttpResponse resp = HttpClient::request(L"POST", L"/auth/signup", body.dump());
-    return parseAuthResponse(resp);
+AuthResult AuthService::signup(const std::string& name, const std::string& password) {
+    try {
+        json body = { {"name", name}, {"email", name}, {"password", password} };
+        return parseAuthResponse(HttpClient::request(L"POST", L"/auth/signup", body.dump()));
+    } catch (...) {
+        AuthResult out;
+        out.message = "Sign up failed";
+        return out;
+    }
 }
 
-AuthResult AuthService::login(const std::string& email, const std::string& password) {
-    json body = { {"email", email}, {"password", password} };
-    const HttpResponse resp = HttpClient::request(L"POST", L"/auth/login", body.dump());
-    return parseAuthResponse(resp);
+AuthResult AuthService::login(const std::string& name, const std::string& password) {
+    try {
+        json body = { {"name", name}, {"email", name}, {"password", password} };
+        return parseAuthResponse(HttpClient::request(L"POST", L"/auth/login", body.dump()));
+    } catch (...) {
+        AuthResult out;
+        out.message = "Wrong name or password";
+        return out;
+    }
 }
 
 AuthResult AuthService::me(const std::string& token) {
     AuthResult out;
-    const HttpResponse resp = HttpClient::request(L"GET", L"/auth/me", {}, token);
-    if (resp.status >= 200 && resp.status < 300) {
-        try {
-            const json j = json::parse(resp.body);
-            if (j.contains("user")) {
-                out.user.id = j["user"].value("id", "");
-                out.user.email = j["user"].value("email", "");
+    try {
+        const HttpResponse resp = HttpClient::request(L"GET", L"/auth/me", {}, token);
+        if (resp.status >= 200 && resp.status < 300) {
+            const json j = parseBody(resp.body);
+            if (j.contains("user") && j["user"].is_object()) {
+                out.user.id = jsonText(j["user"], "id");
+                out.user.email = jsonText(j["user"], "name");
+                if (out.user.email.empty())
+                    out.user.email = jsonText(j["user"], "email");
                 out.ok = !out.user.email.empty();
-                out.message = "Session valid";
             }
-        } catch (...) {
-            out.message = "Invalid session response";
+            return out;
         }
+        return parseAuthResponse(resp);
+    } catch (...) {
+        out.message = "Session check failed";
         return out;
     }
-    return parseAuthResponse(resp);
 }
 
 bool AuthService::saveSession(const std::string& token, const AuthUser& user) {
@@ -113,9 +152,11 @@ bool AuthService::loadSession(std::string& tokenOut, AuthUser& userOut) {
             return false;
         json j;
         f >> j;
-        tokenOut = j.value("token", "");
-        userOut.id = j.value("id", "");
-        userOut.email = j.value("email", "");
+        if (!j.is_object())
+            return false;
+        tokenOut = jsonText(j, "token");
+        userOut.id = jsonText(j, "id");
+        userOut.email = jsonText(j, "email");
         return !tokenOut.empty();
     } catch (...) {
         return false;
