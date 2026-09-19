@@ -105,6 +105,7 @@ const PAGE = `<!doctype html>
   <h2>Seller</h2>
   <div class="nav">
     <button class="on" data-tab="dash">Dashboard</button>
+    <button data-tab="products">Products</button>
     <button data-tab="licenses">Licenses</button>
     <button data-tab="users">Users</button>
   </div>
@@ -113,22 +114,20 @@ const PAGE = `<!doctype html>
   <h1>FiveM</h1>
   <p class="sub">Private seller panel. Keys, durations, and live user IPs.</p>
   <section id="dash">
-    <div class="card">
-      <h3 style="margin:0 0 10px">Upload product file here</h3>
-      <p class="sub">This is the .exe customers get when they click Play.</p>
-      <div class="row">
-        <label>Choose file
-          <input id="pfile" type="file"/>
-        </label>
-        <button class="act" id="upfile">Save file</button>
-      </div>
-      <p class="sub" id="pfileinfo">No file yet</p>
-    </div>
     <div class="stats">
       <div class="stat"><span>Users</span><b id="sUsers">0</b></div>
       <div class="stat"><span>Unused keys</span><b id="sUnused">0</b></div>
       <div class="stat"><span>Redeemed</span><b id="sUsed">0</b></div>
       <div class="stat"><span>Lifetime</span><b id="sLife">0</b></div>
+    </div>
+  </section>
+  <section id="products" class="hide">
+    <div class="card">
+      <p class="sub">Attach the .exe for each product. FiveM customers get this file when they click Play.</p>
+      <table>
+        <thead><tr><th>Product</th><th>Current file</th><th>Upload</th></tr></thead>
+        <tbody id="productsBody"></tbody>
+      </table>
     </div>
   </section>
   <section id="licenses" class="hide">
@@ -181,7 +180,7 @@ document.getElementById("duration").innerHTML=D.map(d=>"<option value='"+d.code+
 document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("on"));
   b.classList.add("on");
-  ["dash","licenses","users"].forEach(id=>document.getElementById(id).classList.toggle("hide", b.dataset.tab!==id));
+  ["dash","products","licenses","users"].forEach(id=>document.getElementById(id).classList.toggle("hide", b.dataset.tab!==id));
 });
 function keyStatus(k){
   if(k.cancelled) return "<span class='bad'>cancelled</span>";
@@ -194,8 +193,11 @@ async function load(){
   document.getElementById("sUnused").textContent=data.stats.unused;
   document.getElementById("sUsed").textContent=data.stats.redeemed;
   document.getElementById("sLife").textContent=data.stats.lifetime;
-  const pf=data.productFile||{};
-  document.getElementById("pfileinfo").textContent=pf.name?("Current file: "+pf.name):"No file yet";
+  const files=data.productFiles||{};
+  document.getElementById("productsBody").innerHTML=P.map(p=>{
+    const f=files[p]||{};
+    return "<tr><td><b>"+esc(p)+"</b></td><td>"+esc(f.name||"No file yet")+"</td><td class='acts'><input type='file' id='pfile-"+esc(p)+"'/><button class='act tiny' data-act='up-file' data-product='"+esc(p)+"'>Save file</button></td></tr>";
+  }).join("");
   document.getElementById("usersBody").innerHTML=(data.users||[]).map(u=>
     "<tr><td>"+esc(u.name)+(u.banned?" <span class='bad'>banned</span>":"")+"</td><td><code>"+esc(u.last_ip)+"</code></td><td><code>"+esc(u.ip)+"</code></td><td><code>"+esc(u.hwid)+"</code></td><td>"+esc(u.sub)+"</td><td>"+(u.lifetime?"Lifetime":fmt(u.expires))+"</td><td>"+fmt(u.last_seen)+"</td><td class='acts'>"+
     "<button class='ghost tiny' data-act='ban-user' data-id='"+esc(u.id)+"' data-banned='"+(u.banned?"0":"1")+"'>"+(u.banned?"Unban":"Ban")+"</button>"+
@@ -221,16 +223,6 @@ document.getElementById("gen").onclick=async()=>{
   const made=data.keys||[];
   if(made[0]) navigator.clipboard.writeText(made.length===1?made[0]:made.join("\\n")).catch(()=>{});
 };
-document.getElementById("upfile").onclick=async()=>{
-  const f=document.getElementById("pfile").files[0];
-  if(!f){ alert("Pick a file first"); return; }
-  const fd=new FormData();
-  fd.append("file", f);
-  fd.append("product","FiveM");
-  const r=await fetch("/admin/api/product-file",{method:"POST",body:fd});
-  if(!r.ok){ alert("Upload failed"); return; }
-  await load();
-};
 document.addEventListener("click", async (e)=>{
   const b=e.target.closest("[data-act]");
   if(!b) return;
@@ -246,6 +238,18 @@ document.addEventListener("click", async (e)=>{
       }
       b.textContent="Copied";
       setTimeout(()=>{ b.textContent="Copy"; }, 900);
+      return;
+    } else if(act==="up-file"){
+      const product=b.dataset.product||"FiveM";
+      const inp=document.getElementById("pfile-"+product);
+      const f=inp&&inp.files&&inp.files[0];
+      if(!f){ alert("Pick a file for "+product+" first"); return; }
+      const fd=new FormData();
+      fd.append("file", f);
+      fd.append("product", product);
+      const r=await fetch("/admin/api/product-file",{method:"POST",body:fd});
+      if(!r.ok){ alert("Upload failed"); return; }
+      await load();
       return;
     } else if(act==="cancel-key"){
       if(!confirm("Cancel this key? It can never be redeemed, and the user's product is removed if it was already used.")) return;
@@ -297,10 +301,14 @@ export function registerAdminRoutes(app) {
     const unused = keys.rows.filter((r) => !r.redeemed_at && !r.cancelled_at).length;
     const redeemed = keys.rows.filter((r) => r.redeemed_at && !r.cancelled_at).length;
     const lifetime = users.rows.filter((r) => r.sub_lifetime && !r.banned).length;
-    const fileRow = await pool.query(`SELECT filename, version, octet_length(data) AS bytes FROM product_files WHERE product = 'FiveM'`);
+    const fileRows = await pool.query(`SELECT product, filename, version, octet_length(data) AS bytes FROM product_files`);
+    const productFiles = {};
+    for (const row of fileRows.rows) {
+      productFiles[row.product] = { name: row.filename, version: row.version, size: row.bytes };
+    }
     res.json({
       stats: { users: users.rowCount, unused, redeemed, lifetime },
-      productFile: fileRow.rows[0] ? { name: fileRow.rows[0].filename, version: fileRow.rows[0].version, size: fileRow.rows[0].bytes } : null,
+      productFiles,
       users: users.rows.map((r) => ({
         id: r.id,
         name: r.email,
