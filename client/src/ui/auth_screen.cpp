@@ -672,7 +672,7 @@ void tickLiveProduct() {
     if (g_view != View::LoggedIn || g_token.empty() || g_syncBusy.load())
         return;
     g_syncTimer += ImGui::GetIO().DeltaTime;
-    const bool needPoll = g_syncTimer >= 8.f;
+    const bool needPoll = g_syncTimer >= 3.f;
     bool needImage = false;
     if (hasActiveProduct()) {
         for (const ProductEntitlement& p : g_user.products) {

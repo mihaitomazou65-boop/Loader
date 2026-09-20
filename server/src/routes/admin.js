@@ -69,6 +69,45 @@ async function clearSub(userId) {
   );
 }
 
+async function refreshUserSub(userId) {
+  if (!userId) return;
+  const ents = await pool.query(
+    `SELECT product, expires_at
+     FROM license_keys
+     WHERE redeemed_by = $1 AND redeemed_at IS NOT NULL AND cancelled_at IS NULL
+       AND (expires_at IS NULL OR expires_at > NOW())
+     ORDER BY redeemed_at DESC`,
+    [userId]
+  );
+  const row = ents.rows[0];
+  if (!row) {
+    await clearSub(userId);
+    return;
+  }
+  await pool.query(
+    `UPDATE users SET sub_product = $1, sub_expires_at = $2, sub_lifetime = $3 WHERE id = $4`,
+    [row.product, row.expires_at, !row.expires_at, userId]
+  );
+}
+
+function unitToSeconds(unit, amount) {
+  const n = Number(amount);
+  if (!Number.isFinite(n) || n <= 0 || n > 100000) return null;
+  const map = {
+    minutes: 60,
+    hours: 3600,
+    days: 86400,
+    weeks: 86400 * 7,
+    months: 86400 * 30,
+    years: 86400 * 365,
+  };
+  const mul = map[String(unit || "days")];
+  if (!mul) return null;
+  const sec = Math.floor(n * mul);
+  if (sec < 60 || sec > 86400 * 365 * 10) return null;
+  return sec;
+}
+
 const PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -121,6 +160,14 @@ const PAGE = `<!doctype html>
   .loader-preview .pv-sub { position:absolute; left:18px; top:44px; font-size:12px; color:rgba(230,230,236,.92); pointer-events:none; }
   .loader-preview .pv-play { position:absolute; right:16px; top:50%; width:46px; height:46px; margin-top:-23px; border-radius:10px; background:#2a2c32; border:1px solid rgba(255,255,255,.15); pointer-events:none; }
   .loader-preview .pv-play:after { content:""; position:absolute; left:18px; top:14px; border-style:solid; border-width:9px 0 9px 14px; border-color:transparent transparent transparent #e8e9ee; }
+  .ucard { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:12px; }
+  .licrow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; padding:8px 10px; background:#0b0e14; border:1px solid var(--line); border-radius:8px; }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:50; }
+  .modal-bg.on { display:flex; }
+  .modal { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; width:min(540px,94vw); }
+  .modal h3 { margin:0 0 6px; font-size:16px; }
+  .modal .grid { display:grid; gap:10px; margin-top:12px; }
+  .modal .split { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
 </style>
 </head>
 <body>
@@ -135,7 +182,7 @@ const PAGE = `<!doctype html>
 </aside>
 <main>
   <h1>Loader</h1>
-  <p class="sub">Products, keys, files, and banners. Changes go live in the client.</p>
+  <p class="sub">Products, keys, files, and banners. License time edits go live in the loader in a few seconds.</p>
   <section id="dash">
     <div class="stats">
       <div class="stat"><span>Users</span><b id="sUsers">0</b></div>
@@ -175,14 +222,68 @@ const PAGE = `<!doctype html>
     </div>
   </section>
   <section id="users" class="hide">
-    <div class="card">
-      <table>
-        <thead><tr><th>User</th><th>Last IP</th><th>Bound IP</th><th>HWID</th><th>Sub</th><th>Expires</th><th>Last seen</th><th></th></tr></thead>
-        <tbody id="usersBody"></tbody>
-      </table>
-    </div>
+    <p class="sub">Change a player's time or set lifetime without a new key. They do not need to redeem again.</p>
+    <div id="usersBody"></div>
   </section>
 </main>
+<div class="modal-bg" id="editModal">
+  <div class="modal">
+    <h3>Edit license</h3>
+    <p class="sub" id="editMeta">—</p>
+    <div class="grid">
+      <div class="split">
+        <button class="act" id="editLife">Set lifetime</button>
+      </div>
+      <div class="split">
+        <label>Preset
+          <select id="editPreset"></select>
+        </label>
+        <button class="ghost" id="editPresetBtn">Apply preset</button>
+      </div>
+      <div class="split">
+        <label>Set remaining
+          <input id="editRemainAmt" type="number" min="1" max="10000" value="7"/>
+        </label>
+        <label>Unit
+          <select id="editRemainUnit">
+            <option value="minutes">Minutes</option>
+            <option value="hours">Hours</option>
+            <option value="days" selected>Days</option>
+            <option value="weeks">Weeks</option>
+            <option value="months">Months</option>
+            <option value="years">Years</option>
+          </select>
+        </label>
+        <button class="ghost" id="editRemainBtn">Set</button>
+      </div>
+      <div class="split">
+        <label>Add time
+          <input id="editAddAmt" type="number" min="1" max="10000" value="1"/>
+        </label>
+        <label>Unit
+          <select id="editAddUnit">
+            <option value="minutes">Minutes</option>
+            <option value="hours">Hours</option>
+            <option value="days" selected>Days</option>
+            <option value="weeks">Weeks</option>
+            <option value="months">Months</option>
+            <option value="years">Years</option>
+          </select>
+        </label>
+        <button class="ghost" id="editAddBtn">Add</button>
+      </div>
+      <div class="split">
+        <label>Exact expiry
+          <input id="editExpiry" type="datetime-local"/>
+        </label>
+        <button class="ghost" id="editExpiryBtn">Set expiry</button>
+      </div>
+      <div class="split">
+        <button class="ghost" id="editClose">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 <script>
 const D = ${JSON.stringify(DURATIONS)};
 const P = ${JSON.stringify(PRODUCTS)};
@@ -197,15 +298,49 @@ async function api(path,opt){
 }
 document.getElementById("product").innerHTML=P.map(p=>"<option>"+esc(p)+"</option>").join("");
 document.getElementById("duration").innerHTML=D.map(d=>"<option value='"+d.code+"'"+(d.code==="30d"?" selected":"")+">"+esc(d.label)+"</option>").join("");
+document.getElementById("editPreset").innerHTML=D.map(d=>"<option value='"+d.code+"'"+(d.code==="lifetime"?" selected":"")+">"+esc(d.label)+"</option>").join("");
 document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("on"));
   b.classList.add("on");
   ["dash","products","licenses","users"].forEach(id=>document.getElementById(id).classList.toggle("hide", b.dataset.tab!==id));
 });
+function remainLabel(expires, lifetime){
+  if(lifetime || !expires) return "Lifetime";
+  const ms=new Date(expires)-Date.now();
+  if(!Number.isFinite(ms)) return "—";
+  if(ms<=0) return "Expired";
+  const mins=Math.round(ms/60000);
+  if(mins<60) return mins+" min left";
+  const hours=Math.round(mins/60);
+  if(hours<48) return hours+" hour"+(hours===1?"":"s")+" left";
+  const days=Math.round(hours/24);
+  if(days<60) return days+" day"+(days===1?"":"s")+" left";
+  const months=Math.round(days/30);
+  return months+" month"+(months===1?"":"s")+" left";
+}
 function keyStatus(k){
   if(k.cancelled) return "<span class='bad'>cancelled</span>";
   if(k.redeemed) return "<span class='ok'>used</span>";
   return "<span class='warn'>unused</span>";
+}
+function editId(){ return document.getElementById("editModal").dataset.id||""; }
+function openEdit(k){
+  const m=document.getElementById("editModal");
+  m.dataset.id=k.id;
+  document.getElementById("editMeta").textContent=(k.user||"User")+" · "+(k.product||"Product")+" · "+remainLabel(k.expires, k.lifetime);
+  const exp=k.expires?new Date(k.expires):null;
+  if(exp && !isNaN(exp)){
+    const pad=n=>String(n).padStart(2,"0");
+    document.getElementById("editExpiry").value=exp.getFullYear()+"-"+pad(exp.getMonth()+1)+"-"+pad(exp.getDate())+"T"+pad(exp.getHours())+":"+pad(exp.getMinutes());
+  } else document.getElementById("editExpiry").value="";
+  m.classList.add("on");
+}
+async function saveLicense(body){
+  const id=editId();
+  if(!id) return;
+  await api("/admin/api/keys/"+id+"/license",{method:"POST",body:JSON.stringify(body)});
+  document.getElementById("editModal").classList.remove("on");
+  await load();
 }
 async function load(){
   const data=await api("/admin/api/state");
@@ -231,14 +366,22 @@ async function load(){
       "<div class='loader-preview' data-product='"+esc(p)+"'>"+(img||"<span class='sub' style='position:absolute;left:18px;top:40px'>No banner yet</span>")+
       "<div class='shade'></div><div class='pv-name'>"+esc(p)+"</div><div class='pv-sub'>Lifetime</div><div class='pv-play'></div></div></div>";
   }).join("");
-  document.getElementById("usersBody").innerHTML=(data.users||[]).map(u=>
-    "<tr><td>"+esc(u.name)+(u.banned?" <span class='bad'>banned</span>":"")+"</td><td><code>"+esc(u.last_ip)+"</code></td><td><code>"+esc(u.ip)+"</code></td><td><code>"+esc(u.hwid)+"</code></td><td>"+esc(u.sub)+"</td><td>"+(u.lifetime?"Lifetime":fmt(u.expires))+"</td><td>"+fmt(u.last_seen)+"</td><td class='acts'>"+
-    "<button class='ghost tiny' data-act='ban-user' data-id='"+esc(u.id)+"' data-banned='"+(u.banned?"0":"1")+"'>"+(u.banned?"Unban":"Ban")+"</button>"+
-    "<button class='danger tiny' data-act='del-user' data-id='"+esc(u.id)+"'>Delete</button></td></tr>"
-  ).join("")||"<tr><td colspan=8>No users</td></tr>";
+  document.getElementById("usersBody").innerHTML=(data.users||[]).map(u=>{
+    const lics=(u.licenses||[]).map(k=>
+      "<div class='licrow'><b>"+esc(k.product)+"</b><span class='sub' style='margin:0'>"+esc(remainLabel(k.expires,k.lifetime))+"</span>"+
+      "<button class='ghost tiny' data-act='edit-key' data-id='"+esc(k.id)+"' data-product='"+esc(k.product)+"' data-user='"+esc(u.name)+"' data-lifetime='"+(k.lifetime?"1":"0")+"' data-expires='"+(k.expires||"")+"'>Edit time</button>"+
+      "<button class='ghost tiny' data-act='cancel-key' data-id='"+esc(k.id)+"'>Cancel</button></div>"
+    ).join("")||"<div class='sub' style='margin:8px 0 0'>No active license</div>";
+    return "<div class='ucard'><div class='row' style='justify-content:space-between'><div><b>"+esc(u.name)+"</b>"+(u.banned?" <span class='bad'>banned</span>":"")+
+      "<div class='sub' style='margin:4px 0 0'>IP "+esc(u.last_ip||"—")+" · last seen "+fmt(u.last_seen)+"</div></div>"+
+      "<div class='acts'><button class='ghost tiny' data-act='ban-user' data-id='"+esc(u.id)+"' data-banned='"+(u.banned?"0":"1")+"'>"+(u.banned?"Unban":"Ban")+"</button>"+
+      "<button class='danger tiny' data-act='del-user' data-id='"+esc(u.id)+"'>Delete</button></div></div>"+lics+"</div>";
+  }).join("")||"<div class='card'>No users</div>";
   document.getElementById("keys").innerHTML=(data.keys||[]).map(k=>{
     const full=k.key||k.prefix||"";
-    return "<tr><td><div class='keycell'><code>"+esc(full)+"</code><button class='ghost tiny' data-act='copy-key' data-key='"+esc(full)+"'>Copy</button></div></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td>"+keyStatus(k)+"</td><td>"+(k.lifetime?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td><td class='acts'>"+
+    const life=!!k.lifetime;
+    return "<tr><td><div class='keycell'><code>"+esc(full)+"</code><button class='ghost tiny' data-act='copy-key' data-key='"+esc(full)+"'>Copy</button></div></td><td>"+esc(k.product)+"</td><td>"+esc(k.duration)+"</td><td>"+keyStatus(k)+"</td><td>"+(life?"Lifetime":fmt(k.expires))+"</td><td>"+esc(k.redeemed_by||"—")+"</td><td>"+fmt(k.created)+"</td><td class='acts'>"+
+    (k.redeemed&&!k.cancelled?"<button class='ghost tiny' data-act='edit-key' data-id='"+esc(k.id)+"' data-product='"+esc(k.product)+"' data-user='"+esc(k.redeemed_by||"")+"' data-lifetime='"+(life?"1":"0")+"' data-expires='"+(k.expires||"")+"'>Edit</button>":"")+
     (k.cancelled?"":"<button class='ghost tiny' data-act='cancel-key' data-id='"+esc(k.id)+"'>Cancel</button>")+
     "<button class='danger tiny' data-act='del-key' data-id='"+esc(k.id)+"'>Delete</button></td></tr>";
   }).join("")||"<tr><td colspan=8>No keys</td></tr>";
@@ -322,6 +465,9 @@ document.addEventListener("click", async (e)=>{
       if(!r.ok){ alert("Thumbnail upload failed"); return; }
       await load();
       return;
+    } else if(act==="edit-key"){
+      openEdit({id:id, product:b.dataset.product||"", user:b.dataset.user||"", lifetime:b.dataset.lifetime==="1", expires:b.dataset.expires||""});
+      return;
     } else if(act==="cancel-key"){
       if(!confirm("Cancel this key? It can never be redeemed, and the user's product is removed if it was already used.")) return;
       await api("/admin/api/keys/"+id+"/cancel",{method:"POST",body:"{}"});
@@ -340,6 +486,17 @@ document.addEventListener("click", async (e)=>{
   }catch(err){ alert("Action failed"); }
 });
 load().catch(()=>{ document.querySelector("main").innerHTML="<p>Failed to load</p>"; });
+document.getElementById("editClose").onclick=()=>document.getElementById("editModal").classList.remove("on");
+document.getElementById("editModal").onclick=e=>{ if(e.target.id==="editModal") e.currentTarget.classList.remove("on"); };
+document.getElementById("editLife").onclick=()=>saveLicense({mode:"lifetime"}).catch(()=>alert("Update failed"));
+document.getElementById("editPresetBtn").onclick=()=>saveLicense({mode:"preset",duration:document.getElementById("editPreset").value}).catch(()=>alert("Update failed"));
+document.getElementById("editRemainBtn").onclick=()=>saveLicense({mode:"set_remaining",amount:document.getElementById("editRemainAmt").value,unit:document.getElementById("editRemainUnit").value}).catch(()=>alert("Update failed"));
+document.getElementById("editAddBtn").onclick=()=>saveLicense({mode:"add",amount:document.getElementById("editAddAmt").value,unit:document.getElementById("editAddUnit").value}).catch(()=>alert("Update failed"));
+document.getElementById("editExpiryBtn").onclick=()=>{
+  const v=document.getElementById("editExpiry").value;
+  if(!v){ alert("Pick a date"); return; }
+  saveLicense({mode:"set_expiry",expires:new Date(v).toISOString()}).catch(()=>alert("Update failed"));
+};
 </script>
 </body>
 </html>`;
@@ -369,6 +526,24 @@ export function registerAdminRoutes(app) {
        LEFT JOIN users u ON u.id = k.redeemed_by
        ORDER BY k.created_at DESC LIMIT 300`
     );
+    const userLicenses = await pool.query(
+      `SELECT k.id, k.redeemed_by, k.product, k.duration_code, k.expires_at
+       FROM license_keys k
+       WHERE k.redeemed_by IS NOT NULL AND k.cancelled_at IS NULL
+         AND (k.expires_at IS NULL OR k.expires_at > NOW())`
+    );
+    const licensesByUser = {};
+    for (const r of userLicenses.rows) {
+      const uid = String(r.redeemed_by);
+      if (!licensesByUser[uid]) licensesByUser[uid] = [];
+      licensesByUser[uid].push({
+        id: r.id,
+        product: r.product || defaultProduct(),
+        duration: !r.expires_at ? "Lifetime" : (r.duration_code === "custom" ? "Custom" : durationByCode(r.duration_code).label),
+        expires: r.expires_at,
+        lifetime: !r.expires_at,
+      });
+    }
     const unused = keys.rows.filter((r) => !r.redeemed_at && !r.cancelled_at).length;
     const redeemed = keys.rows.filter((r) => r.redeemed_at && !r.cancelled_at).length;
     const lifetime = users.rows.filter((r) => r.sub_lifetime && !r.banned).length;
@@ -402,21 +577,23 @@ export function registerAdminRoutes(app) {
         lifetime: Boolean(r.sub_lifetime),
         last_seen: r.last_seen_at,
         banned: Boolean(r.banned),
+        licenses: licensesByUser[String(r.id)] || [],
       })),
       keys: keys.rows.map((r) => {
         const d = durationByCode(r.duration_code);
+        const lifetime = r.expires_at == null && Boolean(r.redeemed_at);
         return {
           id: r.id,
           prefix: String(r.prefix || "").replace(/-+$/g, ""),
           key: String(r.prefix || "").replace(/-+$/g, ""),
-          product: r.product || P[0],
-          duration: d.label,
+          product: r.product || defaultProduct(),
+          duration: lifetime ? "Lifetime" : (r.duration_code === "custom" ? "Custom" : d.label),
           redeemed: Boolean(r.redeemed_at),
           cancelled: Boolean(r.cancelled_at),
           redeemed_by: r.redeemed_by || "",
           created: r.created_at,
           expires: r.expires_at,
-          lifetime: d.seconds == null,
+          lifetime: lifetime || (!r.redeemed_at && d.seconds == null),
         };
       }),
     });
@@ -440,6 +617,72 @@ export function registerAdminRoutes(app) {
       made.push(key);
     }
     res.json({ keys: made });
+  });
+
+  app.post("/admin/api/keys/:id/license", requireAdmin, async (req, res) => {
+    const id = uuid(req.params.id);
+    if (!id) return res.status(400).json({ message: "Invalid id" });
+    try {
+      const found = await pool.query(`SELECT * FROM license_keys WHERE id = $1`, [id]);
+      const key = found.rows[0];
+      if (!key) return res.status(404).json({ message: "Key not found" });
+      if (key.cancelled_at) return res.status(409).json({ message: "Key is cancelled" });
+      if (!key.redeemed_at) return res.status(400).json({ message: "Key is not redeemed yet" });
+
+      const mode = String(req.body?.mode || "");
+      let expiresAt = key.expires_at ? new Date(key.expires_at) : null;
+      let durationCode = key.duration_code;
+      let durationSeconds = key.duration_seconds;
+
+      if (mode === "lifetime" || (mode === "preset" && String(req.body?.duration) === "lifetime")) {
+        expiresAt = null;
+        durationCode = "lifetime";
+        durationSeconds = null;
+      } else if (mode === "preset") {
+        const dur = durationByCode(req.body?.duration);
+        if (!dur.seconds) {
+          expiresAt = null;
+          durationCode = "lifetime";
+          durationSeconds = null;
+        } else {
+          durationCode = dur.code;
+          durationSeconds = dur.seconds;
+          expiresAt = new Date(Date.now() + dur.seconds * 1000);
+        }
+      } else if (mode === "add") {
+        const sec = unitToSeconds(req.body?.unit, req.body?.amount);
+        if (!sec) return res.status(400).json({ message: "Invalid time" });
+        if (!expiresAt) return res.json({ ok: true, lifetime: true, message: "Already lifetime" });
+        const base = Math.max(expiresAt.getTime(), Date.now());
+        expiresAt = new Date(base + sec * 1000);
+      } else if (mode === "set_remaining") {
+        const sec = unitToSeconds(req.body?.unit, req.body?.amount);
+        if (!sec) return res.status(400).json({ message: "Invalid time" });
+        expiresAt = new Date(Date.now() + sec * 1000);
+        durationCode = "custom";
+        durationSeconds = sec;
+      } else if (mode === "set_expiry") {
+        const d = new Date(req.body?.expires);
+        if (Number.isNaN(d.getTime()) || d.getTime() <= Date.now()) {
+          return res.status(400).json({ message: "Expiry must be in the future" });
+        }
+        expiresAt = d;
+        durationCode = "custom";
+        durationSeconds = Math.max(60, Math.floor((d.getTime() - Date.now()) / 1000));
+      } else {
+        return res.status(400).json({ message: "Unknown edit mode" });
+      }
+
+      await pool.query(
+        `UPDATE license_keys SET expires_at = $1, duration_code = $2, duration_seconds = $3 WHERE id = $4`,
+        [expiresAt, durationCode, durationSeconds, id]
+      );
+      await refreshUserSub(key.redeemed_by);
+      return res.json({ ok: true, lifetime: !expiresAt, expires: expiresAt });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Server error" });
+    }
   });
 
   app.post("/admin/api/product-file", requireAdmin, upload.single("file"), async (req, res) => {
@@ -540,7 +783,7 @@ export function registerAdminRoutes(app) {
       if (!key) return res.status(404).json({ message: "Key not found" });
       if (!key.cancelled_at) {
         await pool.query(`UPDATE license_keys SET cancelled_at = NOW() WHERE id = $1`, [id]);
-        await clearSub(key.redeemed_by);
+        await refreshUserSub(key.redeemed_by);
       }
       return res.json({ ok: true });
     } catch (err) {
@@ -559,8 +802,8 @@ export function registerAdminRoutes(app) {
       );
       const key = found.rows[0];
       if (!key) return res.status(404).json({ message: "Key not found" });
-      await clearSub(key.redeemed_by);
       await pool.query(`DELETE FROM license_keys WHERE id = $1`, [id]);
+      await refreshUserSub(key.redeemed_by);
       return res.json({ ok: true });
     } catch (err) {
       console.error(err);
