@@ -122,19 +122,12 @@ async function buildPublicUser(row) {
   } catch (err) {
     console.error("entitlements", err);
   }
-  if (!products.length && row.sub_product) {
-    products.push(await enrichEntitlement({
-      product: row.sub_product,
-      lifetime: !!row.sub_lifetime,
-      expires: row.sub_expires_at ? new Date(row.sub_expires_at).toISOString() : null,
-    }));
-  }
   const primary = products[0];
   return {
     id: row.id,
     name: row.email,
-    product: primary?.product || row.sub_product || "",
-    lifetime: primary?.lifetime || !!row.sub_lifetime || false,
+    product: primary?.product || "",
+    lifetime: primary?.lifetime || false,
     expires: primary?.expires || null,
     file_name: primary?.file_name || "",
     file_version: primary?.file_version || "",

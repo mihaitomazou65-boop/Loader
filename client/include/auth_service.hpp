@@ -2,6 +2,18 @@
 
 #include <optional>
 #include <string>
+#include <vector>
+
+struct ProductEntitlement {
+    std::string product;
+    bool lifetime = false;
+    std::string expires;
+    std::string fileName;
+    std::string fileVersion;
+    std::string thumbVersion;
+    float thumbFx = 0.5f;
+    float thumbFy = 0.5f;
+};
 
 struct AuthUser {
     std::string id;
@@ -14,6 +26,8 @@ struct AuthUser {
     std::string thumbVersion;
     float thumbFx = 0.5f;
     float thumbFy = 0.5f;
+    std::vector<ProductEntitlement> products;
+    bool productsFromServer = false;
 };
 
 struct AuthResult {

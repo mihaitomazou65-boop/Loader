@@ -191,19 +191,22 @@ void takeProductsJson(const json& arr, std::vector<ProductEntitlement>& out) {
 }
 
 void readProductsArray(const json& u, AuthUser& user) {
+    const bool listed = u.contains("products") || u.contains("product_names") || u.contains("product_list");
+    if (listed)
+        user.productsFromServer = true;
     std::vector<ProductEntitlement> got;
     takeProductsJson(findProductsArray(u), got);
     if (u.contains("product_names"))
         takeProductsJson(u["product_names"], got);
     if (u.contains("product_list"))
         takeProductsJson(u["product_list"], got);
-    if (!got.empty())
+    if (listed || !got.empty())
         user.products = std::move(got);
     dedupeProducts(user.products);
 }
 
 void applyPrimaryFromProducts(AuthUser& user) {
-    if (user.products.empty() && !user.product.empty()) {
+    if (user.products.empty() && !user.productsFromServer && !user.product.empty()) {
         ProductEntitlement p;
         p.product = user.product;
         p.lifetime = user.lifetime;

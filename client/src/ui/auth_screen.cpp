@@ -946,7 +946,10 @@ void mergeUserFromServer(const AuthUser& src) {
     if (!src.email.empty())
         g_user.email = src.email;
 
-    if (!src.products.empty()) {
+    if (src.productsFromServer) {
+        g_user.products = src.products;
+        g_user.productsFromServer = true;
+    } else if (!src.products.empty()) {
         for (const ProductEntitlement& incoming : src.products)
             upsertProduct(g_user.products, incoming);
     } else if (!src.product.empty()) {
@@ -964,6 +967,13 @@ void mergeUserFromServer(const AuthUser& src) {
         g_user.thumbVersion = p.thumbVersion;
         g_user.thumbFx = p.thumbFx;
         g_user.thumbFy = p.thumbFy;
+    } else {
+        g_user.product.clear();
+        g_user.fileName.clear();
+        g_user.fileVersion.clear();
+        g_user.thumbVersion.clear();
+        g_user.lifetime = false;
+        g_user.expires.clear();
     }
 }
 
@@ -993,34 +1003,14 @@ void applyAuthResult(const AuthResult& r) {
     }
     g_token = r.token;
     g_prodScroll = 0.f;
-
-    AuthUser cached;
-    std::string cachedTok;
-    const bool hadCache = g_auth.loadSession(cachedTok, cached);
-
     g_user = r.user;
-    if (g_user.products.empty() && !r.user.product.empty())
+    if (g_user.products.empty() && !g_user.productsFromServer && !r.user.product.empty())
         g_user.products.push_back(entitlementFromUser(r.user));
-
-    if (hadCache) {
-        const bool sameAccount =
-            (!cached.id.empty() && cached.id == g_user.id) ||
-            (!cached.email.empty() && !g_user.email.empty() && cached.email == g_user.email);
-        if (sameAccount && !cached.products.empty()) {
-            std::vector<ProductEntitlement> stacked = cached.products;
-            for (const ProductEntitlement& p : g_user.products)
-                upsertProduct(stacked, p);
-            g_user.products = std::move(stacked);
-        }
-    }
-
     pruneExpiredProducts();
     resetLiveThumbs();
     g_auth.saveSession(g_token, g_user);
     g_view = View::LoggedIn;
-    g_expand = 1.f;
-    g_spinAlpha = 0.f;
-    g_app.setClientSizeCentered(kMainW, kMainH);
+    g_spinAlpha = 1.f;
     setStatus("", false);
     g_syncTimer = 8.f;
     std::memset(g_password, 0, sizeof(g_password));
@@ -1037,8 +1027,10 @@ void pumpAuthResults() {
             got = true;
         }
     }
-    if (got)
+    if (got) {
         applyAuthResult(r);
+        g_busy.store(false);
+    }
 }
 
 void submitAuth() {
@@ -1068,7 +1060,6 @@ void submitAuth() {
             g_pending = r;
             g_gotResult = true;
         }
-        g_busy.store(false);
     }).detach();
 }
 
@@ -1151,9 +1142,10 @@ void drawAuthScreen() {
         dl->AddRectFilled(wp, wp + ws, col32(c::window_bg_color));
 
         const bool busy = g_busy.load();
-        const bool loading = busy || (g_view == View::LoggedIn && g_expand < 0.995f);
+        const bool openingMain = (g_view == View::LoggedIn && g_expand < 0.995f);
+        const bool loading = busy || openingMain;
         tickSpinner(loading);
-        const bool showForm = (g_view == View::Form && !busy);
+        const bool showForm = (g_view == View::Form && !busy && g_spinAlpha < 0.2f);
 
         if (showForm) {
             if (font::esp_font)
@@ -1201,15 +1193,20 @@ void drawAuthScreen() {
                 ImGui::PopFont();
         }
         if (g_spinAlpha > 0.01f) {
-            drawSpinner(dl, wp + ws * 0.5f, ImLerp(12.f, 18.f, g_expand), g_spinAlpha);
+            drawSpinner(dl, wp + ws * 0.5f, 15.f, g_spinAlpha);
         }
 
-        if (g_view == View::LoggedIn && g_expand >= 0.995f && g_spinAlpha < 0.25f) {
+        if (g_view == View::LoggedIn && g_expand >= 0.995f && g_spinAlpha < 0.12f) {
             tickLiveProduct();
             tickRedeemStatusTimer();
             ImGui::SetCursorScreenPos(ImVec2(wp.x + 14.f, wp.y + 10.f));
             if (custom::Button(OBF("Redeem key"), ImVec2(112.f, 28.f)))
                 openRedeemDialog();
+            dl->AddRect(
+                ImGui::GetItemRectMin(),
+                ImGui::GetItemRectMax(),
+                IM_COL32(255, 255, 255, 32),
+                8.f, 0, 1.f);
             if (hasActiveProduct())
                 drawProductList(dl, wp, ws);
         }

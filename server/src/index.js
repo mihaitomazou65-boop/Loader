@@ -21,7 +21,7 @@ app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false 
 app.use(express.json({ limit: "32kb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, db: hasDatabase(), panel: 7 });
+  res.json({ ok: true, db: hasDatabase(), panel: 8 });
 });
 
 const authLimiter = rateLimit({
