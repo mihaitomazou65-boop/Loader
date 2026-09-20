@@ -33,27 +33,54 @@ function bindConflict(row, hwid, ip) {
   return null;
 }
 
-function publicUser(row) {
-  const lifetime = Boolean(row.sub_lifetime);
-  const exp = row.sub_expires_at ? new Date(row.sub_expires_at) : null;
-  const active = lifetime || (exp && exp.getTime() > Date.now());
-  return {
-    id: row.id,
-    name: row.email,
-    product: active ? (row.sub_product || "") : "",
-    lifetime,
-    expires: row.sub_expires_at || null,
+async function fetchActiveEntitlements(userId) {
+  const result = await pool.query(
+    `SELECT product, expires_at, redeemed_at
+     FROM license_keys
+     WHERE redeemed_by = $1 AND redeemed_at IS NOT NULL AND cancelled_at IS NULL
+       AND (expires_at IS NULL OR expires_at > NOW())
+     ORDER BY redeemed_at ASC`,
+    [userId]
+  );
+  const map = new Map();
+  for (const row of result.rows) {
+    const product = row.product || defaultProduct();
+    const lifetime = !row.expires_at;
+    const exp = row.expires_at;
+    const redeemed = row.redeemed_at;
+    let cur = map.get(product);
+    if (!cur) {
+      map.set(product, {
+        product,
+        lifetime,
+        expires: exp ? new Date(exp).toISOString() : null,
+        sortAt: redeemed,
+      });
+      continue;
+    }
+    if (redeemed < cur.sortAt) cur.sortAt = redeemed;
+    if (lifetime) {
+      cur.lifetime = true;
+      cur.expires = null;
+    } else if (!cur.lifetime && exp) {
+      const next = new Date(exp);
+      if (!cur.expires || next > new Date(cur.expires)) cur.expires = next.toISOString();
+    }
+  }
+  return [...map.values()].sort((a, b) => new Date(a.sortAt) - new Date(b.sortAt));
+}
+
+async function enrichEntitlement(ent) {
+  const u = {
+    product: ent.product,
+    lifetime: ent.lifetime,
+    expires: ent.expires,
     file_name: "",
     file_version: "",
     thumb_version: "",
     thumb_fx: 0.5,
     thumb_fy: 0.5,
   };
-}
-
-async function withProductFile(row) {
-  const u = publicUser(row);
-  if (!u.product) return u;
   try {
     const f = await pool.query(
       `SELECT filename, version FROM product_files WHERE product = $1`,
@@ -78,6 +105,45 @@ async function withProductFile(row) {
     }
   } catch (_) {}
   return u;
+}
+
+async function userHasProduct(userId, product) {
+  const ents = await fetchActiveEntitlements(userId);
+  return ents.some((e) => e.product === product);
+}
+
+async function buildPublicUser(row) {
+  let products = [];
+  try {
+    const ents = await fetchActiveEntitlements(row.id);
+    for (const e of ents) {
+      products.push(await enrichEntitlement(e));
+    }
+  } catch (err) {
+    console.error("entitlements", err);
+  }
+  if (!products.length && row.sub_product) {
+    products.push(await enrichEntitlement({
+      product: row.sub_product,
+      lifetime: !!row.sub_lifetime,
+      expires: row.sub_expires_at ? new Date(row.sub_expires_at).toISOString() : null,
+    }));
+  }
+  const primary = products[0];
+  return {
+    id: row.id,
+    name: row.email,
+    product: primary?.product || row.sub_product || "",
+    lifetime: primary?.lifetime || !!row.sub_lifetime || false,
+    expires: primary?.expires || null,
+    file_name: primary?.file_name || "",
+    file_version: primary?.file_version || "",
+    thumb_version: primary?.thumb_version || "",
+    thumb_fx: primary?.thumb_fx ?? 0.5,
+    thumb_fy: primary?.thumb_fy ?? 0.5,
+    products,
+    product_names: products.map((p) => p.product).filter(Boolean),
+  };
 }
 
 export function registerAuthRoutes(app) {
@@ -123,7 +189,7 @@ export function registerAuthRoutes(app) {
 
       const user = result.rows[0];
       const token = signToken({ id: user.id, email: user.email });
-      return res.status(201).json({ token, user: await withProductFile({ ...user, sub_product: null, sub_expires_at: null, sub_lifetime: false }) });
+      return res.status(201).json({ token, user: await buildPublicUser(user) });
     } catch (err) {
       if (err.code === "23505") {
         return res.status(409).json({ message: "Name already taken" });
@@ -184,7 +250,7 @@ export function registerAuthRoutes(app) {
       }
 
       const token = signToken({ id: row.id, email: row.email });
-      return res.json({ token, user: await withProductFile(row) });
+      return res.json({ token, user: await buildPublicUser(row) });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ message: "Server error" });
@@ -208,7 +274,7 @@ export function registerAuthRoutes(app) {
       if (user.bind_ip && !isPrivateIp(user.bind_ip) && user.bind_ip !== ip) {
         return res.status(403).json({ message: "Account locked to another network" });
       }
-      return res.json({ user: await withProductFile(user) });
+      return res.json({ user: await buildPublicUser(user) });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ message: "Server error" });
@@ -275,7 +341,7 @@ export function registerAuthRoutes(app) {
         [key.product || defaultProduct(), expiresSql, lifetime, req.user.id]
       );
       const fresh = await client.query(
-        `SELECT id, email, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
+        `SELECT id, email FROM users WHERE id = $1`,
         [req.user.id]
       );
       await client.query("COMMIT");
@@ -283,7 +349,7 @@ export function registerAuthRoutes(app) {
       return res.json({
         ok: true,
         message: lifetime ? `${prod} lifetime redeemed` : `${prod} key redeemed`,
-        user: await withProductFile(fresh.rows[0]),
+        user: await buildPublicUser(fresh.rows[0]),
       });
     } catch (err) {
       try { if (client) await client.query("ROLLBACK"); } catch (_) {}
@@ -297,17 +363,20 @@ export function registerAuthRoutes(app) {
   app.get("/auth/product-file", authMiddleware, async (req, res) => {
     try {
       const result = await pool.query(
-        `SELECT id, banned, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
+        `SELECT id, banned FROM users WHERE id = $1`,
         [req.user.id]
       );
       const user = result.rows[0];
       if (!user) return res.status(401).json({ message: "Unauthorized" });
       if (user.banned) return res.status(403).json({ message: "Account banned" });
-      const u = publicUser(user);
-      if (!u.product) return res.status(403).json({ message: "No product" });
+      const product = String(req.query.product || "").trim();
+      if (!product) return res.status(400).json({ message: "Product required" });
+      if (!(await userHasProduct(user.id, product))) {
+        return res.status(403).json({ message: "No product" });
+      }
       const file = await pool.query(
         `SELECT filename, version, data FROM product_files WHERE product = $1`,
-        [u.product]
+        [product]
       );
       if (!file.rowCount) return res.status(404).json({ message: "No product file" });
       const row = file.rows[0];
@@ -326,17 +395,20 @@ export function registerAuthRoutes(app) {
   app.get("/auth/product-thumb", authMiddleware, async (req, res) => {
     try {
       const result = await pool.query(
-        `SELECT id, banned, sub_product, sub_expires_at, sub_lifetime FROM users WHERE id = $1`,
+        `SELECT id, banned FROM users WHERE id = $1`,
         [req.user.id]
       );
       const user = result.rows[0];
       if (!user) return res.status(401).json({ message: "Unauthorized" });
       if (user.banned) return res.status(403).json({ message: "Account banned" });
-      const u = publicUser(user);
-      if (!u.product) return res.status(403).json({ message: "No product" });
+      const product = String(req.query.product || "").trim();
+      if (!product) return res.status(400).json({ message: "Product required" });
+      if (!(await userHasProduct(user.id, product))) {
+        return res.status(403).json({ message: "No product" });
+      }
       const file = await pool.query(
         `SELECT filename, version, mime, data FROM product_thumbs WHERE product = $1`,
-        [u.product]
+        [product]
       );
       if (!file.rowCount) return res.status(404).json({ message: "No thumbnail" });
       const row = file.rows[0];

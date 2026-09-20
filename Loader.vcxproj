@@ -33,7 +33,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(SolutionDir)x64\Release\</OutDir>
+    <OutDir>$(SolutionDir)</OutDir>
     <IntDir>$(SolutionDir)x64\Release\obj\</IntDir>
     <TargetName>Loader</TargetName>
   </PropertyGroup>
@@ -55,7 +55,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;winhttp.lib;iphlpapi.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;winhttp.lib;iphlpapi.lib;bcrypt.lib;windowscodecs.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -64,21 +64,28 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_WINDOWS;_CRT_SECURE_NO_WARNINGS;LOADER_API_BASE_URL="https://loader-pu27.onrender.com";LOADER_BRAND="Loader";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir)client\include;$(ProjectDir)client\src\ui;$(ProjectDir)client\third_party;$(ProjectDir)client\third_party\nlohmann;$(ProjectDir)client\third_party\imgui;$(ProjectDir)client\third_party\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /guard:cf %(AdditionalOptions)</AdditionalOptions>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;winhttp.lib;iphlpapi.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalOptions>/GUARD:CF %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;winhttp.lib;iphlpapi.lib;bcrypt.lib;windowscodecs.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>if exist "$(SolutionDir)x64\Release\Loader.exe" del /q "$(SolutionDir)x64\Release\Loader.exe"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="client\src\protect.cpp" />
+    <ClCompile Include="client\src\session_crypto.cpp" />
     <ClCompile Include="client\src\main.cpp" />
     <ClCompile Include="client\src\app_window.cpp" />
     <ClCompile Include="client\src\http_client.cpp" />
@@ -91,6 +98,9 @@
     <ClCompile Include="client\third_party\imgui\imgui_widgets.cpp" />
     <ClCompile Include="client\third_party\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="client\third_party\imgui\backends\imgui_impl_dx11.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Loader.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

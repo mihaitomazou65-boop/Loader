@@ -68,6 +68,167 @@ float jsonNum(const json& j, const char* key, float fallback = 0.5f) {
     return fallback;
 }
 
+std::string jsonTextAny(const json& j, const char* a, const char* b = nullptr) {
+    std::string s = jsonText(j, a);
+    if (s.empty() && b)
+        s = jsonText(j, b);
+    return s;
+}
+
+void dedupeProducts(std::vector<ProductEntitlement>& list) {
+    std::vector<ProductEntitlement> out;
+    out.reserve(list.size());
+    for (const ProductEntitlement& p : list) {
+        if (p.product.empty())
+            continue;
+        bool exists = false;
+        for (const ProductEntitlement& e : out) {
+            if (e.product == p.product) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists)
+            out.push_back(p);
+    }
+    list.swap(out);
+}
+
+ProductEntitlement parseProductEntitlement(const json& u) {
+    ProductEntitlement p;
+    p.product = jsonTextAny(u, "product", OBF("product"));
+    p.expires = jsonTextAny(u, "expires", OBF("expires"));
+    p.fileName = jsonTextAny(u, "file_name", OBF("file_name"));
+    p.fileVersion = jsonTextAny(u, "file_version", OBF("file_version"));
+    p.thumbVersion = jsonTextAny(u, "thumb_version", OBF("thumb_version"));
+    p.thumbFx = jsonNum(u, "thumb_fx", jsonNum(u, OBF("thumb_fx"), 0.5f));
+    p.thumbFy = jsonNum(u, "thumb_fy", jsonNum(u, OBF("thumb_fy"), 0.5f));
+    auto readLife = [&](const char* k) {
+        if (u.contains(k) && u[k].is_boolean())
+            p.lifetime = u[k].get<bool>();
+    };
+    readLife("lifetime");
+    readLife(OBF("lifetime"));
+    return p;
+}
+
+json findProductsArray(const json& u) {
+    auto tryGet = [&](const char* key) -> json {
+        if (!u.contains(key))
+            return json();
+        const json& v = u[key];
+        if (v.is_array())
+            return v;
+        if (v.is_object()) {
+            json arr = json::array();
+            for (auto it = v.begin(); it != v.end(); ++it) {
+                if (it.value().is_object())
+                    arr.push_back(it.value());
+            }
+            return arr;
+        }
+        if (v.is_string()) {
+            json parsed = json::parse(v.get<std::string>(), nullptr, false);
+            if (!parsed.is_discarded() && parsed.is_array())
+                return parsed;
+        }
+        return json();
+    };
+    json arr = tryGet("products");
+    if (arr.is_array())
+        return arr;
+    arr = tryGet(OBF("products"));
+    if (arr.is_array())
+        return arr;
+    for (auto it = u.begin(); it != u.end(); ++it) {
+        if (!it.value().is_array() || it.value().empty())
+            continue;
+        if (it.value().front().is_object() && (it.value().front().contains("product") || it.value().front().contains("name")))
+            return it.value();
+    }
+    return json::array();
+}
+
+void addProductName(std::vector<ProductEntitlement>& list, const std::string& name) {
+    if (name.empty())
+        return;
+    for (const ProductEntitlement& p : list) {
+        if (p.product == name)
+            return;
+    }
+    ProductEntitlement p;
+    p.product = name;
+    list.push_back(std::move(p));
+}
+
+void takeProductsJson(const json& arr, std::vector<ProductEntitlement>& out) {
+    if (!arr.is_array())
+        return;
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const json item = arr.at(i);
+        if (item.is_string()) {
+            addProductName(out, item.get<std::string>());
+            continue;
+        }
+        if (!item.is_object())
+            continue;
+        ProductEntitlement p = parseProductEntitlement(item);
+        if (p.product.empty())
+            p.product = jsonTextAny(item, "name", OBF("name"));
+        if (p.product.empty())
+            continue;
+        bool exists = false;
+        for (ProductEntitlement& e : out) {
+            if (e.product == p.product) {
+                e = p;
+                exists = true;
+                break;
+            }
+        }
+        if (!exists)
+            out.push_back(std::move(p));
+    }
+}
+
+void readProductsArray(const json& u, AuthUser& user) {
+    std::vector<ProductEntitlement> got;
+    takeProductsJson(findProductsArray(u), got);
+    if (u.contains("product_names"))
+        takeProductsJson(u["product_names"], got);
+    if (u.contains("product_list"))
+        takeProductsJson(u["product_list"], got);
+    if (!got.empty())
+        user.products = std::move(got);
+    dedupeProducts(user.products);
+}
+
+void applyPrimaryFromProducts(AuthUser& user) {
+    if (user.products.empty() && !user.product.empty()) {
+        ProductEntitlement p;
+        p.product = user.product;
+        p.lifetime = user.lifetime;
+        p.expires = user.expires;
+        p.fileName = user.fileName;
+        p.fileVersion = user.fileVersion;
+        p.thumbVersion = user.thumbVersion;
+        p.thumbFx = user.thumbFx;
+        p.thumbFy = user.thumbFy;
+        user.products.push_back(std::move(p));
+    }
+    dedupeProducts(user.products);
+    if (user.products.empty())
+        return;
+    const ProductEntitlement& p = user.products.front();
+    user.product = p.product;
+    user.lifetime = p.lifetime;
+    user.expires = p.expires;
+    user.fileName = p.fileName;
+    user.fileVersion = p.fileVersion;
+    user.thumbVersion = p.thumbVersion;
+    user.thumbFx = p.thumbFx;
+    user.thumbFy = p.thumbFy;
+}
+
 json parseBody(const std::string& body) {
     if (body.empty())
         return json::object();
@@ -199,19 +360,25 @@ AuthResult AuthService::parseAuthResponse(const HttpResponse& resp) {
             out.token = jsonText(j, OBF("token"));
             if (j.contains(OBF("user")) && j[OBF("user")].is_object()) {
                 const json& u = j[OBF("user")];
-                out.user.id = jsonText(u, OBF("id"));
-                out.user.email = jsonText(u, OBF("name"));
+                out.user.id = jsonTextAny(u, "id", OBF("id"));
+                out.user.email = jsonTextAny(u, "name", OBF("name"));
                 if (out.user.email.empty())
-                    out.user.email = jsonText(u, OBF("email"));
-                out.user.product = jsonText(u, OBF("product"));
-                out.user.expires = jsonText(u, OBF("expires"));
-                out.user.fileName = jsonText(u, OBF("file_name"));
-                out.user.fileVersion = jsonText(u, OBF("file_version"));
-                out.user.thumbVersion = jsonText(u, OBF("thumb_version"));
-                out.user.thumbFx = jsonNum(u, OBF("thumb_fx"), 0.5f);
-                out.user.thumbFy = jsonNum(u, OBF("thumb_fy"), 0.5f);
-                if (u.contains(OBF("lifetime")) && u[OBF("lifetime")].is_boolean())
+                    out.user.email = jsonTextAny(u, "email", OBF("email"));
+                out.user.product = jsonTextAny(u, "product", OBF("product"));
+                out.user.expires = jsonTextAny(u, "expires", OBF("expires"));
+                out.user.fileName = jsonTextAny(u, "file_name", OBF("file_name"));
+                out.user.fileVersion = jsonTextAny(u, "file_version", OBF("file_version"));
+                out.user.thumbVersion = jsonTextAny(u, "thumb_version", OBF("thumb_version"));
+                out.user.thumbFx = jsonNum(u, "thumb_fx", jsonNum(u, OBF("thumb_fx"), 0.5f));
+                out.user.thumbFy = jsonNum(u, "thumb_fy", jsonNum(u, OBF("thumb_fy"), 0.5f));
+                if (u.contains("lifetime") && u["lifetime"].is_boolean())
+                    out.user.lifetime = u["lifetime"].get<bool>();
+                else if (u.contains(OBF("lifetime")) && u[OBF("lifetime")].is_boolean())
                     out.user.lifetime = u[OBF("lifetime")].get<bool>();
+                readProductsArray(u, out.user);
+                if (out.user.products.empty())
+                    readProductsArray(j, out.user);
+                applyPrimaryFromProducts(out.user);
             }
             out.ok = !out.token.empty() || !out.user.id.empty() || !out.user.email.empty()
                 || (j.contains(OBF("ok")) && j[OBF("ok")].is_boolean() && j[OBF("ok")].get<bool>());
@@ -312,18 +479,38 @@ AuthResult AuthService::me(const std::string& token) {
 
 bool AuthService::saveSession(const std::string& token, const AuthUser& user) {
     try {
-        json j = {
-            {OBF("token"), token},
-            {OBF("id"), user.id},
-            {OBF("email"), user.email},
-            {OBF("product"), user.product},
-            {OBF("lifetime"), user.lifetime},
-            {OBF("expires"), user.expires},
-            {OBF("file_name"), user.fileName},
-            {OBF("file_version"), user.fileVersion},
-            {OBF("thumb_version"), user.thumbVersion},
-            {OBF("thumb_fx"), user.thumbFx},
-            {OBF("thumb_fy"), user.thumbFy}};
+        json products = json::array();
+        for (const ProductEntitlement& p : user.products) {
+            json item = json::object();
+            item["product"] = p.product;
+            item["lifetime"] = p.lifetime;
+            item["expires"] = p.expires;
+            item["file_name"] = p.fileName;
+            item["file_version"] = p.fileVersion;
+            item["thumb_version"] = p.thumbVersion;
+            item["thumb_fx"] = p.thumbFx;
+            item["thumb_fy"] = p.thumbFy;
+            products.push_back(std::move(item));
+        }
+        json names = json::array();
+        for (const ProductEntitlement& p : user.products) {
+            if (!p.product.empty())
+                names.push_back(p.product);
+        }
+        json j = json::object();
+        j["token"] = token;
+        j["id"] = user.id;
+        j["email"] = user.email;
+        j["product"] = user.product;
+        j["lifetime"] = user.lifetime;
+        j["expires"] = user.expires;
+        j["file_name"] = user.fileName;
+        j["file_version"] = user.fileVersion;
+        j["thumb_version"] = user.thumbVersion;
+        j["thumb_fx"] = user.thumbFx;
+        j["thumb_fy"] = user.thumbFy;
+        j["products"] = products;
+        j["product_names"] = names;
         return session_crypto::writeEncryptedFile(sessionPath(), j.dump());
     } catch (...) {
         return false;
@@ -347,19 +534,23 @@ bool AuthService::loadSession(std::string& tokenOut, AuthUser& userOut) {
             session_crypto::writeEncryptedFile(path, legacyText);
             fs::remove(legacySessionPath());
         }
-        tokenOut = jsonText(j, OBF("token"));
-        userOut.id = jsonText(j, OBF("id"));
-        userOut.email = jsonText(j, OBF("email"));
-        userOut.product = jsonText(j, OBF("product"));
-        userOut.expires = jsonText(j, OBF("expires"));
-        userOut.fileName = jsonText(j, OBF("file_name"));
-        userOut.fileVersion = jsonText(j, OBF("file_version"));
-        userOut.thumbVersion = jsonText(j, OBF("thumb_version"));
-        userOut.thumbFx = jsonNum(j, OBF("thumb_fx"), 0.5f);
-        userOut.thumbFy = jsonNum(j, OBF("thumb_fy"), 0.5f);
-        if (j.contains(OBF("lifetime")) && j[OBF("lifetime")].is_boolean())
+        tokenOut = jsonTextAny(j, "token", OBF("token"));
+        userOut.id = jsonTextAny(j, "id", OBF("id"));
+        userOut.email = jsonTextAny(j, "email", OBF("email"));
+        userOut.product = jsonTextAny(j, "product", OBF("product"));
+        userOut.expires = jsonTextAny(j, "expires", OBF("expires"));
+        userOut.fileName = jsonTextAny(j, "file_name", OBF("file_name"));
+        userOut.fileVersion = jsonTextAny(j, "file_version", OBF("file_version"));
+        userOut.thumbVersion = jsonTextAny(j, "thumb_version", OBF("thumb_version"));
+        userOut.thumbFx = jsonNum(j, "thumb_fx", jsonNum(j, OBF("thumb_fx"), 0.5f));
+        userOut.thumbFy = jsonNum(j, "thumb_fy", jsonNum(j, OBF("thumb_fy"), 0.5f));
+        if (j.contains("lifetime") && j["lifetime"].is_boolean())
+            userOut.lifetime = j["lifetime"].get<bool>();
+        else if (j.contains(OBF("lifetime")) && j[OBF("lifetime")].is_boolean())
             userOut.lifetime = j[OBF("lifetime")].get<bool>();
-        return !tokenOut.empty();
+        readProductsArray(j, userOut);
+        applyPrimaryFromProducts(userOut);
+        return !tokenOut.empty() || !userOut.products.empty();
     } catch (...) {
         return false;
     }

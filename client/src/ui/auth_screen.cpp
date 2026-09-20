@@ -22,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <map>
 #include <vector>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -43,6 +44,9 @@ bool g_wantSubmit = false;
 bool g_wantRedeem = false;
 bool g_redeemOpen = false;
 std::atomic<bool> g_redeemBusy{false};
+char g_redeemStatus[256]{};
+bool g_redeemError = false;
+float g_redeemStatusTimer = 0.f;
 char g_key[96]{};
 char g_fivemPath[520]{};
 bool g_fivemPathLoaded = false;
@@ -60,22 +64,31 @@ float g_expand = 0.f;
 float g_spinAlpha = 0.f;
 std::atomic<bool> g_playBusy{false};
 char g_playMsg[128]{};
+std::string g_playProduct;
 ID3D11ShaderResourceView* g_fivemBanner = nullptr;
 int g_fivemBannerW = 0;
 int g_fivemBannerH = 0;
-ID3D11ShaderResourceView* g_liveBanner = nullptr;
-int g_liveBannerW = 0;
-int g_liveBannerH = 0;
-std::string g_loadedThumbVer;
-std::string g_loadedThumbProduct;
-float g_loadedThumbFx = 0.5f;
-float g_loadedThumbFy = 0.5f;
+struct LiveThumb {
+    ID3D11ShaderResourceView* srv = nullptr;
+    int w = 0;
+    int h = 0;
+    std::string ver;
+    float fx = 0.5f;
+    float fy = 0.5f;
+};
+std::map<std::string, LiveThumb> g_liveThumbs;
 std::atomic<bool> g_syncBusy{false};
 float g_syncTimer = 8.f;
 std::mutex g_thumbBytesMu;
-std::string g_thumbBytes;
-std::string g_thumbBytesVer;
-bool g_thumbBytesReady = false;
+struct PendingThumb {
+    std::string product;
+    std::string bytes;
+    std::string ver;
+    float fx = 0.5f;
+    float fy = 0.5f;
+};
+std::vector<PendingThumb> g_pendingThumbs;
+float g_prodScroll = 0.f;
 
 constexpr float kRound = 12.f;
 constexpr float kFieldH = 34.f;
@@ -96,6 +109,32 @@ void setStatus(const char* msg, bool error) {
         return;
     }
     strncpy_s(g_status, msg, _TRUNCATE);
+}
+
+void setRedeemStatus(const char* msg, bool error, float successAutoClearSec = 0.f) {
+    g_redeemError = error;
+    g_redeemStatusTimer = (!error && successAutoClearSec > 0.f) ? successAutoClearSec : 0.f;
+    if (!msg || !msg[0]) {
+        g_redeemStatus[0] = 0;
+        g_redeemError = false;
+        g_redeemStatusTimer = 0.f;
+        return;
+    }
+    strncpy_s(g_redeemStatus, msg, _TRUNCATE);
+}
+
+void openRedeemDialog() {
+    g_redeemOpen = true;
+    setRedeemStatus("", false);
+    g_redeemBusy.store(false);
+}
+
+void tickRedeemStatusTimer() {
+    if (g_redeemStatusTimer <= 0.f)
+        return;
+    g_redeemStatusTimer -= ImGui::GetIO().DeltaTime;
+    if (g_redeemStatusTimer <= 0.f && !g_redeemError)
+        setRedeemStatus("", false);
 }
 
 void initFonts() {
@@ -141,6 +180,8 @@ void applyStyle() {
     s.Colors[ImGuiCol_Text] = utils::ImColorToImVec4(c::text::label::active);
     s.Colors[ImGuiCol_TextDisabled] = utils::ImColorToImVec4(c::text::label::default);
     s.Colors[ImGuiCol_TextSelectedBg] = ImVec4(1.f, 1.f, 1.f, 0.16f);
+    s.Colors[ImGuiCol_PopupBg] = ImVec4(18.f / 255.f, 18.f / 255.f, 20.f / 255.f, 1.f);
+    s.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.f, 0.f, 0.f, 0.28f);
 }
 
 void applyPaste(char* buf, int bufSize, ImGuiID textId = 0) {
@@ -289,30 +330,57 @@ std::wstring productDirName(const std::string& product) {
     return utf8ToWide(safe);
 }
 
-void resetLiveBanner() {
-    if (g_liveBanner) {
-        g_liveBanner->Release();
-        g_liveBanner = nullptr;
+void resetLiveThumbs() {
+    for (auto& kv : g_liveThumbs) {
+        if (kv.second.srv)
+            kv.second.srv->Release();
     }
-    g_liveBannerW = 0;
-    g_liveBannerH = 0;
-    g_loadedThumbVer.clear();
-    g_loadedThumbProduct.clear();
+    g_liveThumbs.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_thumbBytesMu);
+        g_pendingThumbs.clear();
+    }
 }
 
-void launchProduct();
+std::wstring urlEncodeQueryUtf8(const std::string& s) {
+    std::wstring out;
+    out.reserve(s.size() * 3);
+    auto hex = [](unsigned v) -> wchar_t { return (v < 10) ? (L'0' + v) : (L'A' + (v - 10)); };
+    for (unsigned char c : s) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')
+            out.push_back((wchar_t)c);
+        else {
+            out.push_back(L'%');
+            out.push_back(hex(c >> 4));
+            out.push_back(hex(c & 0xf));
+        }
+    }
+    return out;
+}
+
+const ProductEntitlement* findEntitlement(const std::string& product) {
+    for (const ProductEntitlement& p : g_user.products) {
+        if (p.product == product)
+            return &p;
+    }
+    return nullptr;
+}
+
+void launchProduct(const std::string& product);
 bool hasActiveProduct();
 void tickLiveProduct();
+void pruneExpiredProducts();
 
-void launchProduct() {
+void launchProduct(const std::string& product) {
     if (g_playBusy.load())
         return;
-    if (!hasActiveProduct())
+    const ProductEntitlement* ent = findEntitlement(product);
+    if (!ent)
         return;
     const std::string token = g_token;
-    const std::string product = g_user.product;
-    const std::string ver = g_user.fileVersion.empty() ? OBF("live") : g_user.fileVersion;
-    std::string name = g_user.fileName.empty() ? OBF("product.exe") : g_user.fileName;
+    const std::string ver = ent->fileVersion.empty() ? OBF("live") : ent->fileVersion;
+    std::string name = ent->fileName.empty() ? OBF("product.exe") : ent->fileName;
+    g_playProduct = product;
     for (char& c : name) {
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
             c = '_';
@@ -347,8 +415,9 @@ void launchProduct() {
             dest = dir + L"\\" + utf8ToWide(name);
             {
                 std::snprintf(g_playMsg, sizeof(g_playMsg), "%s", OBF("Downloading..."));
-                const HttpResponse resp =
-                    HttpClient::request(OBFW(L"GET"), OBFW(L"/auth/product-file"), {}, token);
+                const std::wstring path =
+                    OBFW(L"/auth/product-file?product=") + urlEncodeQueryUtf8(product);
+                const HttpResponse resp = HttpClient::request(OBFW(L"GET"), path, {}, token);
                 if (resp.status < 200 || resp.status >= 300 || resp.body.empty()) {
                     std::snprintf(g_playMsg, sizeof(g_playMsg), "%s", OBF("No product file"));
                     g_playBusy.store(false);
@@ -400,14 +469,14 @@ time_t parseExpiresUtc(const std::string& iso) {
     return _mkgmtime(&t);
 }
 
-void formatRemain(char* out, size_t cap) {
+void formatRemainFor(const ProductEntitlement& ent, char* out, size_t cap) {
     if (!out || cap < 8)
         return;
-    if (g_user.lifetime) {
+    if (ent.lifetime) {
         std::snprintf(out, cap, "%s", OBF("Lifetime"));
         return;
     }
-    const time_t exp = parseExpiresUtc(g_user.expires);
+    const time_t exp = parseExpiresUtc(ent.expires);
     const time_t now = time(nullptr);
     if (exp <= 0) {
         std::snprintf(out, cap, "%s", OBF("No time left"));
@@ -445,21 +514,56 @@ void formatRemain(char* out, size_t cap) {
     }
 }
 
-bool hasActiveProduct() {
-    if (g_user.product.empty())
+bool entitlementActive(const ProductEntitlement& ent) {
+    if (ent.product.empty())
         return false;
-    if (g_user.lifetime)
+    if (ent.lifetime)
         return true;
-    const time_t exp = parseExpiresUtc(g_user.expires);
-    if (exp <= 0 || exp <= time(nullptr)) {
-        g_user.product.clear();
-        g_user.fileName.clear();
-        g_user.fileVersion.clear();
-        g_user.thumbVersion.clear();
-        g_auth.saveSession(g_token, g_user);
-        return false;
+    if (ent.expires.empty())
+        return true;
+    const time_t exp = parseExpiresUtc(ent.expires);
+    if (exp <= 0)
+        return true;
+    return exp > time(nullptr);
+}
+
+void pruneExpiredProducts() {
+    bool changed = false;
+    for (auto it = g_user.products.begin(); it != g_user.products.end();) {
+        if (entitlementActive(*it))
+            ++it;
+        else {
+            it = g_user.products.erase(it);
+            changed = true;
+        }
     }
-    return true;
+    if (changed) {
+        if (!g_user.products.empty()) {
+            const ProductEntitlement& p = g_user.products.front();
+            g_user.product = p.product;
+            g_user.lifetime = p.lifetime;
+            g_user.expires = p.expires;
+            g_user.fileName = p.fileName;
+            g_user.fileVersion = p.fileVersion;
+            g_user.thumbVersion = p.thumbVersion;
+            g_user.thumbFx = p.thumbFx;
+            g_user.thumbFy = p.thumbFy;
+        } else {
+            g_user.product.clear();
+            g_user.fileName.clear();
+            g_user.fileVersion.clear();
+            g_user.thumbVersion.clear();
+        }
+        g_auth.saveSession(g_token, g_user);
+    }
+}
+
+bool hasActiveProduct() {
+    for (const ProductEntitlement& p : g_user.products) {
+        if (!p.product.empty())
+            return true;
+    }
+    return false;
 }
 
 bool createTextureFromBytes(const void* bytes, size_t nbytes, ID3D11ShaderResourceView** outSrv, int* outW, int* outH) {
@@ -536,49 +640,60 @@ void ensureFiveMBanner() {
     createTextureFromBytes(bytes, nbytes, &g_fivemBanner, &g_fivemBannerW, &g_fivemBannerH);
 }
 
-void applyPendingThumb() {
-    std::string bytes, ver;
+void applyPendingThumbs() {
+    std::vector<PendingThumb> batch;
     {
         std::lock_guard<std::mutex> lock(g_thumbBytesMu);
-        if (!g_thumbBytesReady)
+        if (g_pendingThumbs.empty())
             return;
-        bytes.swap(g_thumbBytes);
-        ver.swap(g_thumbBytesVer);
-        g_thumbBytesReady = false;
+        batch.swap(g_pendingThumbs);
     }
-    if (bytes.empty())
-        return;
-    ID3D11ShaderResourceView* srv = nullptr;
-    int w = 0, h = 0;
-    if (!createTextureFromBytes(bytes.data(), bytes.size(), &srv, &w, &h))
-        return;
-    if (g_liveBanner)
-        g_liveBanner->Release();
-    g_liveBanner = srv;
-    g_liveBannerW = w;
-    g_liveBannerH = h;
-    g_loadedThumbVer = ver;
-    g_loadedThumbProduct = g_user.product;
-    g_loadedThumbFx = g_user.thumbFx;
-    g_loadedThumbFy = g_user.thumbFy;
+    for (PendingThumb& pt : batch) {
+        if (pt.bytes.empty())
+            continue;
+        ID3D11ShaderResourceView* srv = nullptr;
+        int w = 0, h = 0;
+        if (!createTextureFromBytes(pt.bytes.data(), pt.bytes.size(), &srv, &w, &h))
+            continue;
+        LiveThumb& slot = g_liveThumbs[pt.product];
+        if (slot.srv)
+            slot.srv->Release();
+        slot.srv = srv;
+        slot.w = w;
+        slot.h = h;
+        slot.ver = pt.ver;
+        slot.fx = pt.fx;
+        slot.fy = pt.fy;
+    }
 }
 
 void tickLiveProduct() {
-    applyPendingThumb();
+    applyPendingThumbs();
     if (g_view != View::LoggedIn || g_token.empty() || g_syncBusy.load())
         return;
     g_syncTimer += ImGui::GetIO().DeltaTime;
     const bool needPoll = g_syncTimer >= 8.f;
-    const bool needImage = hasActiveProduct() && !g_user.thumbVersion.empty()
-        && (g_user.product != g_loadedThumbProduct || g_user.thumbVersion != g_loadedThumbVer);
+    bool needImage = false;
+    if (hasActiveProduct()) {
+        for (const ProductEntitlement& p : g_user.products) {
+            if (p.thumbVersion.empty())
+                continue;
+            const auto it = g_liveThumbs.find(p.product);
+            if (it == g_liveThumbs.end() || it->second.ver != p.thumbVersion) {
+                needImage = true;
+                break;
+            }
+        }
+    }
     if (!needPoll && !needImage)
         return;
     g_syncTimer = 0.f;
     g_syncBusy.store(true);
     const std::string token = g_token;
-    const std::string loadedVer = g_loadedThumbVer;
-    const std::string loadedProd = g_loadedThumbProduct;
-    std::thread([token, loadedVer, loadedProd] {
+    std::map<std::string, std::string> loadedVers;
+    for (const auto& kv : g_liveThumbs)
+        loadedVers[kv.first] = kv.second.ver;
+    std::thread([token, loadedVers] {
         AuthService svc;
         AuthResult r;
         try {
@@ -592,17 +707,29 @@ void tickLiveProduct() {
             g_pending = r;
             g_gotResult = true;
         }
-        if (r.ok && !r.user.product.empty() && !r.user.thumbVersion.empty()
-            && (r.user.product != loadedProd || r.user.thumbVersion != loadedVer)) {
-            try {
-                const HttpResponse img = HttpClient::request(OBFW(L"GET"), OBFW(L"/auth/product-thumb"), {}, token);
-                if (img.status >= 200 && img.status < 300 && !img.body.empty()) {
-                    std::lock_guard<std::mutex> lock(g_thumbBytesMu);
-                    g_thumbBytes = img.body;
-                    g_thumbBytesVer = r.user.thumbVersion;
-                    g_thumbBytesReady = true;
+        if (r.ok) {
+            for (const ProductEntitlement& p : r.user.products) {
+                if (p.thumbVersion.empty())
+                    continue;
+                const auto prev = loadedVers.find(p.product);
+                if (prev != loadedVers.end() && prev->second == p.thumbVersion)
+                    continue;
+                try {
+                    const std::wstring path =
+                        OBFW(L"/auth/product-thumb?product=") + urlEncodeQueryUtf8(p.product);
+                    const HttpResponse img = HttpClient::request(OBFW(L"GET"), path, {}, token);
+                    if (img.status >= 200 && img.status < 300 && !img.body.empty()) {
+                        PendingThumb pt;
+                        pt.product = p.product;
+                        pt.bytes = img.body;
+                        pt.ver = p.thumbVersion;
+                        pt.fx = p.thumbFx;
+                        pt.fy = p.thumbFy;
+                        std::lock_guard<std::mutex> lock(g_thumbBytesMu);
+                        g_pendingThumbs.push_back(std::move(pt));
+                    }
+                } catch (...) {
                 }
-            } catch (...) {
             }
         }
         g_syncBusy.store(false);
@@ -635,86 +762,122 @@ void coverUv(float boxW, float boxH, float imgW, float imgH, float fx, float fy,
     uv1.y -= dv;
 }
 
-void drawProductCard(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
-    if (g_user.product == OBF("FiveM"))
+void drawProductCard(ImDrawList* dl, const ProductEntitlement& ent, const ImVec2& p0, float cardW, int id) {
+    if (ent.product == OBF("FiveM"))
         ensureFiveMBanner();
-    const float cardW = ws.x - 32.f;
     const float cardH = 108.f;
     const float rnd = 12.f;
     const ImDrawFlags roundAll = ImDrawFlags_RoundCornersAll;
 
-    const float x0 = floorf(wp.x + 16.f);
-    const float y0 = floorf(wp.y + 58.f);
+    const float x0 = floorf(p0.x);
+    const float y0 = floorf(p0.y);
     const float x1 = x0 + floorf(cardW);
     const float y1 = y0 + floorf(cardH);
-    const ImVec2 p0(x0, y0);
-    const ImVec2 p1(x1, y1);
-    const float iw = x1 - x0;
-    const float ih = y1 - y0;
+    const ImVec2 a0(x0, y0);
+    const ImVec2 a1(x1, y1);
+    const float iw = ImMax(1.f, x1 - x0);
+    const float ih = ImMax(1.f, y1 - y0);
 
-    dl->AddRectFilled(p0, p1, IM_COL32(10, 10, 12, 255), rnd, roundAll);
+    dl->AddRectFilled(a0, a1, IM_COL32(10, 10, 12, 255), rnd, roundAll);
 
-    ID3D11ShaderResourceView* fallback = (g_user.product == OBF("FiveM")) ? g_fivemBanner : nullptr;
-    if (g_liveBanner || fallback) {
-        ID3D11ShaderResourceView* tex = g_liveBanner ? g_liveBanner : fallback;
-        const float tw = g_liveBanner ? (float)g_liveBannerW : (float)g_fivemBannerW;
-        const float th = g_liveBanner ? (float)g_liveBannerH : (float)g_fivemBannerH;
-        ImVec2 uv0, uv1;
-        coverUv(iw, ih, tw, th, g_user.thumbFx, g_user.thumbFy, uv0, uv1);
-        dl->AddImageRounded((ImTextureID)tex, p0, p1, uv0, uv1, IM_COL32(255, 255, 255, 255), rnd, roundAll);
-
-        dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 118), rnd, roundAll);
+    LiveThumb* live = nullptr;
+    const auto it = g_liveThumbs.find(ent.product);
+    if (it != g_liveThumbs.end())
+        live = &it->second;
+    ID3D11ShaderResourceView* fallback = (ent.product == OBF("FiveM")) ? g_fivemBanner : nullptr;
+    ID3D11ShaderResourceView* tex = nullptr;
+    if (live && live->srv)
+        tex = live->srv;
+    else
+        tex = fallback;
+    if (tex) {
+        const float tw = (live && live->srv) ? (float)live->w : (float)g_fivemBannerW;
+        const float th = (live && live->srv) ? (float)live->h : (float)g_fivemBannerH;
+        const float fx = live ? live->fx : ent.thumbFx;
+        const float fy = live ? live->fy : ent.thumbFy;
+        ImVec2 uv0(0.f, 0.f), uv1(1.f, 1.f);
+        coverUv(iw, ih, tw, th, fx, fy, uv0, uv1);
+        dl->AddImageRounded((ImTextureID)tex, a0, a1, uv0, uv1, IM_COL32(255, 255, 255, 255), rnd, roundAll);
+        dl->AddRectFilled(a0, a1, IM_COL32(0, 0, 0, 118), rnd, roundAll);
     }
 
-    dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 42), rnd, roundAll, 1.f);
+    dl->AddRect(a0, a1, IM_COL32(255, 255, 255, 42), rnd, roundAll, 1.f);
 
-    const float x = p0.x;
-    const float y = p0.y;
-    const ImVec2 title(x + 18.f, y + 16.f);
-    if (font::brand_font)
-        ImGui::PushFont(font::brand_font);
-    ImGui::SetCursorScreenPos(ImVec2(title.x + 1.f, title.y + 1.f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.f, 0.f, 0.f, 0.72f));
-    const char* prodLabel = g_user.product.empty() ? OBF("Product") : g_user.product.c_str();
-    ImGui::TextUnformatted(prodLabel);
-    ImGui::PopStyleColor();
-    ImGui::SetCursorScreenPos(title);
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-    ImGui::TextUnformatted(prodLabel);
-    ImGui::PopStyleColor();
-    if (font::brand_font)
-        ImGui::PopFont();
+    const char* prodLabel = ent.product.empty() ? OBF("Product") : ent.product.c_str();
+    ImFont* titleFont = font::brand_font ? font::brand_font : ImGui::GetFont();
+    const float titleSize = titleFont ? titleFont->FontSize : 18.f;
+    dl->AddText(titleFont, titleSize, ImVec2(a0.x + 19.f, a0.y + 17.f), IM_COL32(0, 0, 0, 184), prodLabel);
+    dl->AddText(titleFont, titleSize, ImVec2(a0.x + 18.f, a0.y + 16.f), IM_COL32(255, 255, 255, 255), prodLabel);
 
     char remain[64]{};
-    formatRemain(remain, sizeof(remain));
-    const char* sub = g_playMsg[0] ? g_playMsg : remain;
-    ImGui::SetCursorScreenPos(ImVec2(x + 18.f, y + 44.f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.90f, 0.93f, 0.92f));
-    ImGui::TextUnformatted(sub);
-    ImGui::PopStyleColor();
+    formatRemainFor(ent, remain, sizeof(remain));
+    const bool showPlayMsg = g_playMsg[0] && g_playProduct == ent.product;
+    const char* sub = showPlayMsg ? g_playMsg : remain;
+    ImFont* bodyFont = font::s_inter_semibold ? font::s_inter_semibold : ImGui::GetFont();
+    const float bodySize = bodyFont ? bodyFont->FontSize : 14.f;
+    dl->AddText(bodyFont, bodySize, ImVec2(a0.x + 18.f, a0.y + 44.f), IM_COL32(230, 230, 237, 235), sub);
 
     const float box = 46.f;
     const float boxR = 10.f;
-    const ImVec2 b0(floorf(p1.x - 16.f - box), floorf((p0.y + p1.y) * 0.5f - box * 0.5f));
-    const ImVec2 b1(b0.x + box, b0.y + box);
+    const ImVec2 b0(floorf(a1.x - 16.f - box), floorf((a0.y + a1.y) * 0.5f - box * 0.5f));
+    ImGui::PushID(ent.product.c_str());
+    ImGui::PushID(id);
     ImGui::SetCursorScreenPos(b0);
-    ImGui::BeginDisabled(g_playBusy.load());
-    char playId[96]{};
-    std::snprintf(playId, sizeof(playId), "play_%s", g_user.product.c_str());
-    if (ImGui::InvisibleButton(playId, ImVec2(box, box)))
-        launchProduct();
+    ImGui::BeginDisabled(g_playBusy.load() || g_redeemOpen);
+    if (ImGui::InvisibleButton("play", ImVec2(box, box)))
+        launchProduct(ent.product);
     ImGui::EndDisabled();
     const bool hov = ImGui::IsItemHovered();
-    dl->AddRectFilled(b0, b1, hov ? IM_COL32(58, 60, 66, 255) : IM_COL32(42, 44, 50, 255), boxR, roundAll);
-    dl->AddRect(b0, b1, hov ? IM_COL32(210, 212, 218, 70) : IM_COL32(255, 255, 255, 38), boxR, roundAll, 1.f);
+    ImGui::PopID();
+    ImGui::PopID();
+    dl->AddRectFilled(b0, ImVec2(b0.x + box, b0.y + box), hov ? IM_COL32(58, 60, 66, 255) : IM_COL32(42, 44, 50, 255), boxR, roundAll);
+    dl->AddRect(b0, ImVec2(b0.x + box, b0.y + box), hov ? IM_COL32(210, 212, 218, 70) : IM_COL32(255, 255, 255, 38), boxR, roundAll, 1.f);
 
-    const ImVec2 pc((b0.x + b1.x) * 0.5f + 1.35f, (b0.y + b1.y) * 0.5f);
-    const float tw = 11.2f;
-    const float th = 12.8f;
-    dl->PathLineTo(ImVec2(pc.x - tw * 0.42f, pc.y - th * 0.5f));
-    dl->PathLineTo(ImVec2(pc.x + tw * 0.62f, pc.y));
-    dl->PathLineTo(ImVec2(pc.x - tw * 0.42f, pc.y + th * 0.5f));
+    const ImVec2 pc(b0.x + box * 0.5f + 1.35f, b0.y + box * 0.5f);
+    const float triW = 11.2f;
+    const float triH = 12.8f;
+    dl->PathLineTo(ImVec2(pc.x - triW * 0.42f, pc.y - triH * 0.5f));
+    dl->PathLineTo(ImVec2(pc.x + triW * 0.62f, pc.y));
+    dl->PathLineTo(ImVec2(pc.x - triW * 0.42f, pc.y + triH * 0.5f));
     dl->PathFillConvex(hov ? IM_COL32(248, 248, 250, 255) : IM_COL32(232, 233, 238, 255));
+}
+
+void drawProductList(ImDrawList* dl, const ImVec2& wp, const ImVec2& ws) {
+    if (!dl)
+        return;
+    const float cardH = 108.f;
+    const float gap = 12.f;
+    const float stride = cardH + gap;
+    const float x = floorf(wp.x + 16.f);
+    const float top = floorf(wp.y + 52.f);
+    const float w = floorf(ws.x - 32.f);
+    const float viewH = floorf(ws.y - 64.f);
+
+    std::vector<ProductEntitlement> rows;
+    rows.reserve(g_user.products.size());
+    for (const ProductEntitlement& p : g_user.products) {
+        if (!p.product.empty())
+            rows.push_back(p);
+    }
+    if (rows.empty())
+        return;
+
+    const float contentH = (float)rows.size() * cardH + (float)ImMax(0, (int)rows.size() - 1) * gap;
+    const float maxScroll = ImMax(0.f, contentH - viewH);
+    if (ImGui::IsMouseHoveringRect(ImVec2(x, top), ImVec2(x + w, top + viewH), false) && !g_redeemOpen)
+        g_prodScroll -= ImGui::GetIO().MouseWheel * 48.f;
+    g_prodScroll = ImClamp(g_prodScroll, 0.f, maxScroll);
+
+    if (ImGuiWindow* wnd = ImGui::GetCurrentWindow()) {
+        wnd->SkipItems = false;
+        wnd->Hidden = false;
+    }
+    dl->PushClipRect(ImVec2(x, top), ImVec2(x + w, top + viewH), false);
+    for (int row = 0; row < (int)rows.size(); ++row) {
+        const float y = top + (float)row * stride - g_prodScroll;
+        drawProductCard(dl, rows[(size_t)row], ImVec2(x, y), w, 9000 + row);
+    }
+    dl->PopClipRect();
 }
 
 void drawSpinner(ImDrawList* dl, ImVec2 center, float radius, float alpha) {
@@ -752,57 +915,112 @@ void tickSpinner(bool loading) {
         g_spinAlpha = ImMax(target, g_spinAlpha - dt * speed);
 }
 
+void upsertProduct(std::vector<ProductEntitlement>& list, const ProductEntitlement& incoming) {
+    if (incoming.product.empty())
+        return;
+    for (ProductEntitlement& p : list) {
+        if (p.product == incoming.product) {
+            p = incoming;
+            return;
+        }
+    }
+    list.push_back(incoming);
+}
+
+ProductEntitlement entitlementFromUser(const AuthUser& u) {
+    ProductEntitlement p;
+    p.product = u.product;
+    p.lifetime = u.lifetime;
+    p.expires = u.expires;
+    p.fileName = u.fileName;
+    p.fileVersion = u.fileVersion;
+    p.thumbVersion = u.thumbVersion;
+    p.thumbFx = u.thumbFx;
+    p.thumbFy = u.thumbFy;
+    return p;
+}
+
+void mergeUserFromServer(const AuthUser& src) {
+    if (!src.id.empty())
+        g_user.id = src.id;
+    if (!src.email.empty())
+        g_user.email = src.email;
+
+    if (!src.products.empty()) {
+        for (const ProductEntitlement& incoming : src.products)
+            upsertProduct(g_user.products, incoming);
+    } else if (!src.product.empty()) {
+        upsertProduct(g_user.products, entitlementFromUser(src));
+    }
+
+    pruneExpiredProducts();
+    if (!g_user.products.empty()) {
+        const ProductEntitlement& p = g_user.products.front();
+        g_user.product = p.product;
+        g_user.lifetime = p.lifetime;
+        g_user.expires = p.expires;
+        g_user.fileName = p.fileName;
+        g_user.fileVersion = p.fileVersion;
+        g_user.thumbVersion = p.thumbVersion;
+        g_user.thumbFx = p.thumbFx;
+        g_user.thumbFy = p.thumbFy;
+    }
+}
+
 void applyAuthResult(const AuthResult& r) {
     if (!r.ok) {
-        setStatus(r.message.empty() ? OBF("Wrong name or password") : r.message.c_str(), true);
+        if (g_view == View::LoggedIn && g_redeemOpen)
+            setRedeemStatus(r.message.empty() ? OBF("Can't redeem this key") : r.message.c_str(), true);
+        else
+            setStatus(r.message.empty() ? OBF("Wrong name or password") : r.message.c_str(), true);
         return;
     }
     if (r.liveSync) {
-        if (r.ok) {
-            g_user.product = r.user.product;
-            g_user.lifetime = r.user.lifetime;
-            g_user.expires = r.user.expires;
-            if (!r.user.fileName.empty())
-                g_user.fileName = r.user.fileName;
-            if (!r.user.fileVersion.empty())
-                g_user.fileVersion = r.user.fileVersion;
-            if (g_user.product != r.user.product)
-                resetLiveBanner();
-            g_user.product = r.user.product;
-            g_user.thumbVersion = r.user.thumbVersion;
-            g_user.thumbFx = r.user.thumbFx;
-            g_user.thumbFy = r.user.thumbFy;
-            g_auth.saveSession(g_token, g_user);
-        }
+        mergeUserFromServer(r.user);
+        g_auth.saveSession(g_token, g_user);
         return;
     }
     if (g_view == View::LoggedIn) {
-        if (!r.user.product.empty() && g_user.product != r.user.product)
-            resetLiveBanner();
-        if (!r.user.product.empty())
-            g_user.product = r.user.product;
-        g_user.lifetime = r.user.lifetime;
-        g_user.expires = r.user.expires;
-        if (!r.user.fileName.empty())
-            g_user.fileName = r.user.fileName;
-        if (!r.user.fileVersion.empty())
-            g_user.fileVersion = r.user.fileVersion;
-        if (!r.user.thumbVersion.empty())
-            g_user.thumbVersion = r.user.thumbVersion;
-        g_user.thumbFx = r.user.thumbFx;
-        g_user.thumbFy = r.user.thumbFy;
+        mergeUserFromServer(r.user);
         g_auth.saveSession(g_token, g_user);
-        g_syncTimer = 8.f;
-        setStatus(r.message.empty() ? OBF("Key redeemed") : r.message.c_str(), false);
+        g_syncTimer = 0.f;
+        setRedeemStatus(
+            r.message.empty() ? OBF("Key redeemed") : r.message.c_str(),
+            false,
+            3.5f);
         std::memset(g_key, 0, sizeof(g_key));
-        g_redeemOpen = false;
         return;
     }
     g_token = r.token;
+    g_prodScroll = 0.f;
+
+    AuthUser cached;
+    std::string cachedTok;
+    const bool hadCache = g_auth.loadSession(cachedTok, cached);
+
     g_user = r.user;
-    resetLiveBanner();
+    if (g_user.products.empty() && !r.user.product.empty())
+        g_user.products.push_back(entitlementFromUser(r.user));
+
+    if (hadCache) {
+        const bool sameAccount =
+            (!cached.id.empty() && cached.id == g_user.id) ||
+            (!cached.email.empty() && !g_user.email.empty() && cached.email == g_user.email);
+        if (sameAccount && !cached.products.empty()) {
+            std::vector<ProductEntitlement> stacked = cached.products;
+            for (const ProductEntitlement& p : g_user.products)
+                upsertProduct(stacked, p);
+            g_user.products = std::move(stacked);
+        }
+    }
+
+    pruneExpiredProducts();
+    resetLiveThumbs();
     g_auth.saveSession(g_token, g_user);
     g_view = View::LoggedIn;
+    g_expand = 1.f;
+    g_spinAlpha = 0.f;
+    g_app.setClientSizeCentered(kMainW, kMainH);
     setStatus("", false);
     g_syncTimer = 8.f;
     std::memset(g_password, 0, sizeof(g_password));
@@ -859,11 +1077,11 @@ void submitRedeem() {
         return;
     const std::string key = g_key;
     if (key.size() < 10) {
-        setStatus(OBF("Invalid key"), true);
+        setRedeemStatus(OBF("Invalid key"), true);
         return;
     }
     g_redeemBusy.store(true);
-    setStatus("", false);
+    setRedeemStatus("", false);
     const std::string token = g_token;
     std::thread([key, token] {
         AuthResult r;
@@ -890,11 +1108,17 @@ void wipeSensitiveMemory(const bool clearDiskSession) {
     SecureZeroMemory(g_password, sizeof(g_password));
     SecureZeroMemory(g_key, sizeof(g_key));
     SecureZeroMemory(g_status, sizeof(g_status));
+    SecureZeroMemory(g_redeemStatus, sizeof(g_redeemStatus));
+    g_redeemError = false;
+    g_redeemStatusTimer = 0.f;
+    g_redeemOpen = false;
     SecureZeroMemory(g_playMsg, sizeof(g_playMsg));
     SecureZeroMemory(g_fivemPath, sizeof(g_fivemPath));
     g_token.clear();
     g_token.shrink_to_fit();
     g_user = AuthUser{};
+    g_playProduct.clear();
+    resetLiveThumbs();
     g_playBusy.store(false);
     g_busy.store(false);
     g_redeemBusy.store(false);
@@ -916,7 +1140,7 @@ void drawAuthScreen() {
         ImGui::SetNextWindowPos(ImVec2(0.f, 0.f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(display, ImGuiCond_Always);
 
-        ImGui::Begin(OBF("auth"), nullptr,
+        ImGui::Begin("##loader", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground |
             ImGuiWindowFlags_NoSavedSettings);
@@ -980,51 +1204,90 @@ void drawAuthScreen() {
             drawSpinner(dl, wp + ws * 0.5f, ImLerp(12.f, 18.f, g_expand), g_spinAlpha);
         }
 
-        if (g_view == View::LoggedIn && g_expand > 0.97f && g_spinAlpha < 0.25f) {
+        if (g_view == View::LoggedIn && g_expand >= 0.995f && g_spinAlpha < 0.25f) {
             tickLiveProduct();
+            tickRedeemStatusTimer();
             ImGui::SetCursorScreenPos(ImVec2(wp.x + 14.f, wp.y + 10.f));
             if (custom::Button(OBF("Redeem key"), ImVec2(112.f, 28.f)))
-                g_redeemOpen = true;
-
+                openRedeemDialog();
             if (hasActiveProduct())
-                drawProductCard(dl, wp, ws);
-
-            if (g_redeemOpen) {
-                const ImVec2 box(340.f, 198.f);
-                const ImVec2 p0 = wp + (ws - box) * 0.5f;
-                const ImVec2 p1 = p0 + box;
-                dl->AddRectFilled(p0, p1, IM_COL32(14, 14, 14, 255), 10.f);
-                dl->AddRect(p0, p1, IM_COL32(48, 48, 48, 255), 10.f, 0, 1.f);
-                ImGui::SetCursorScreenPos(p0 + ImVec2(16.f, 14.f));
-                ImGui::BeginGroup();
-                ImGui::TextUnformatted(OBF("Redeem key"));
-                ImGui::Dummy(ImVec2(0.f, 8.f));
-                textInput("redeemkey", g_key, IM_ARRAYSIZE(g_key), box.x - 32.f, 34.f);
-                ImGui::Dummy(ImVec2(0.f, 10.f));
-                const float btnGap = 8.f;
-                const float btnW = (box.x - 32.f - btnGap) * 0.5f;
-                ImGui::BeginDisabled(g_redeemBusy.load());
-                if (custom::Button(OBF("Redeem"), ImVec2(btnW, 32.f)))
-                    g_wantRedeem = true;
-                ImGui::EndDisabled();
-                ImGui::SameLine(0.f, btnGap);
-                if (custom::Button(OBF("Close"), ImVec2(btnW, 32.f)))
-                    g_redeemOpen = false;
-                ImGui::Dummy(ImVec2(0.f, 8.f));
-                ImGui::PushTextWrapPos(p0.x + box.x - 16.f);
-                ImGui::PushStyleColor(ImGuiCol_Text, g_error
-                    ? ImVec4(0.91f, 0.28f, 0.28f, 1.f)
-                    : utils::ImColorToImVec4(c::text::label::default));
-                ImGui::TextUnformatted(g_status[0] ? g_status : " ");
-                ImGui::PopStyleColor();
-                ImGui::PopTextWrapPos();
-                ImGui::EndGroup();
-            }
+                drawProductList(dl, wp, ws);
         }
 
         drawCloseX(dl);
 
         ImGui::End();
+
+        if (g_view == View::LoggedIn && g_expand > 0.97f && g_redeemOpen) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                g_redeemOpen = false;
+                setRedeemStatus("", false);
+            }
+
+            const ImVec2 box(340.f, 198.f);
+            const ImVec2 p0 = wp + (ws - box) * 0.5f;
+            const ImVec2 p1 = p0 + box;
+
+            ImGui::SetNextWindowPos(wp, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ws, ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.f);
+            ImGui::SetNextWindowFocus();
+            ImGui::Begin(OBF("##redeem_layer"), nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNavFocus);
+
+            ImDrawList* overlay = ImGui::GetWindowDrawList();
+            overlay->AddRectFilled(wp, wp + ws, IM_COL32(0, 0, 0, 80));
+            overlay->AddRectFilled(p0, p1, IM_COL32(18, 18, 20, 255), 10.f);
+            overlay->AddRect(p0, p1, IM_COL32(70, 70, 76, 255), 10.f, 0, 1.f);
+
+            ImGui::SetNextItemAllowOverlap();
+            ImGui::SetCursorScreenPos(wp);
+            if (ImGui::InvisibleButton(OBF("redeem_dim"), ws)) {
+                const ImVec2 m = ImGui::GetIO().MousePos;
+                const bool inside = m.x >= p0.x && m.x <= p1.x && m.y >= p0.y && m.y <= p1.y;
+                if (!inside) {
+                    g_redeemOpen = false;
+                    setRedeemStatus("", false);
+                }
+            }
+
+            ImGui::SetCursorScreenPos(p0 + ImVec2(16.f, 14.f));
+            ImGui::BeginChild(OBF("redeem_box"), ImVec2(box.x - 32.f, box.y - 28.f), false,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::TextUnformatted(OBF("Redeem key"));
+            ImGui::Dummy(ImVec2(0.f, 8.f));
+            textInput("redeemkey", g_key, IM_ARRAYSIZE(g_key), box.x - 32.f, 34.f);
+            ImGui::Dummy(ImVec2(0.f, 10.f));
+            const float btnGap = 8.f;
+            const float btnW = (box.x - 32.f - btnGap) * 0.5f;
+            ImGui::BeginDisabled(g_redeemBusy.load());
+            if (custom::Button(OBF("Redeem"), ImVec2(btnW, 32.f)))
+                g_wantRedeem = true;
+            ImGui::EndDisabled();
+            ImGui::SameLine(0.f, btnGap);
+            if (custom::Button(OBF("Close"), ImVec2(btnW, 32.f))) {
+                g_redeemOpen = false;
+                setRedeemStatus("", false);
+            }
+            ImGui::Dummy(ImVec2(0.f, 8.f));
+            ImGui::PushTextWrapPos(ImGui::GetCursorScreenPos().x + box.x - 32.f);
+            const ImVec4 redeemTextCol = g_redeemError
+                ? ImVec4(0.91f, 0.28f, 0.28f, 1.f)
+                : (g_redeemStatus[0]
+                    ? ImVec4(0.55f, 0.88f, 0.58f, 1.f)
+                    : utils::ImColorToImVec4(c::text::label::default));
+            ImGui::PushStyleColor(ImGuiCol_Text, redeemTextCol);
+            ImGui::TextUnformatted(g_redeemStatus[0] ? g_redeemStatus : " ");
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+            ImGui::EndChild();
+
+            drawCloseX(overlay);
+            ImGui::End();
+        }
 
         if (g_wantSubmit) {
             g_wantSubmit = false;

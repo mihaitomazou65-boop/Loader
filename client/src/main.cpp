@@ -1,25 +1,22 @@
 ﻿#include "app_window.hpp"
 #include "auth_screen.hpp"
+#include "protect.hpp"
 #include "imgui_impl_dx11.h"
 #include <windows.h>
-#include <thread>
-
-namespace {
-constexpr ULONGLONG kHardSessionMs = 3ull * 60ull * 1000ull;
-ULONGLONG g_bootTick = 0;
-
-void enforceHardTimeout() {
-    if (g_bootTick && GetTickCount64() - g_bootTick >= kHardSessionMs)
-        ExitProcess(0);
-}
-}
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
-    g_bootTick = GetTickCount64();
-    std::thread([] {
-        Sleep(static_cast<DWORD>(kHardSessionMs));
-        ExitProcess(0);
-    }).detach();
+    const HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\LoaderAppSingleton");
+    if (!single || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (single)
+            CloseHandle(single);
+        if (HWND existing = FindWindowW(L"LoaderAuthWindow", nullptr)) {
+            ShowWindow(existing, SW_SHOW);
+            SetForegroundWindow(existing);
+        }
+        return 0;
+    }
+
+    protect::init();
 
     if (!g_app.create(instance))
         return 1;
@@ -28,15 +25,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplDX11_CreateDeviceObjects();
 
     while (g_app.beginFrame()) {
-        enforceHardTimeout();
+        protect::tick();
         try {
             loader_ui::drawAuthScreen();
         } catch (...) {
         }
-        enforceHardTimeout();
         g_app.endFrame();
     }
 
+    loader_ui::wipeSensitiveMemory();
     g_app.destroy();
+    CloseHandle(single);
     return 0;
 }
