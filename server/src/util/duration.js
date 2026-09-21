@@ -1,10 +1,11 @@
-export const PRODUCTS = ["FiveM", "FiveM DMA", "Bodycam", "Counter-Strike 2"];
+export const PRODUCTS = ["FiveM", "FiveM DMA", "Bodycam", "Counter-Strike 2", "Roblox"];
 
 export const PRODUCT_TAGS = {
   FiveM: "FIVEM",
   "FiveM DMA": "FIVDMA",
   Bodycam: "BODCAM",
   "Counter-Strike 2": "CS2",
+  Roblox: "ROBLOX",
 };
 
 export const DURATIONS = [
